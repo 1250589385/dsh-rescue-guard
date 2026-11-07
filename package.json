@@ -1,0 +1,60 @@
+{
+  "name": "dsh-rescue-guard",
+  "version": "0.2.1",
+  "description": "DSH 启动救援与自我修复：启动前静态预检命令名冲突与缺失文件，保留配置快照，DSH 起不来时用独立 CLI（dsh-rescue）禁用可疑 bundle 并回滚清单。",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "plugin",
+    "harness",
+    "cordis",
+    "rescue",
+    "recovery",
+    "safe-mode",
+    "crash",
+    "diagnostics",
+    "doctor",
+    "repair",
+    "watchdog",
+    "backup",
+    "snapshot",
+    "rollback",
+    "devtools"
+  ],
+  "bin": {
+    "dsh-rescue": "bin/dsh-rescue.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "bin",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "PROVENANCE.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
