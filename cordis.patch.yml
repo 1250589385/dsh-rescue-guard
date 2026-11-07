@@ -1,0 +1,8 @@
+# dsh-rescue-guard bundle patch
+#
+# Loads early (a low `order` on its own row would need Loader support; the practical lever is
+# that this plugin does nothing during `apply` except register routes and read state files, so
+# it cannot itself become a startup hazard).
+- insert:
+    - id: dsh-rescue-guard
+      name: 'dsh-rescue-guard'
