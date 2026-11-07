@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Startup Rescue">
+  <title>Startup Rescue</title>
+  <defs>
+    <linearGradient id="rg-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a59"/>
+      <stop offset="1" stop-color="#e5432c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded tile: the "rescue station" plate -->
+  <rect x="1.5" y="1.5" width="21" height="21" rx="5" ry="5" fill="url(#rg-bg)"/>
+
+  <!-- heartbeat trace: flat, spike, flat — reads as "life signs being monitored" -->
+  <path d="M4 12.4h3.1l1.6-3.6 2.2 6.4 1.9-4.4 1.5 1.6h4.7"
+        fill="none" stroke="#ffffff" stroke-width="1.7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- small wrench notch at the lower right: the "repair" half of rescue -->
+  <path d="M16.6 15.2a2.1 2.1 0 0 1 2.8 2.8l-1.5 1.5a2.1 2.1 0 0 1-2.8-2.8z"
+        fill="#ffffff" fill-opacity="0.92"/>
+  <path d="M18.6 16.6l-1.4 1.4" fill="none" stroke="#e5432c" stroke-width="0.9" stroke-linecap="round"/>
+</svg>
