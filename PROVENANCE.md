@@ -26,6 +26,31 @@
 
 崩溃日志本身**不属于**本项目的分发内容，仅在开发时只读分析；本仓库不包含这些日志。
 
+## 0.3.0 的依据：2026-11-09 的真实事故
+
+本机在 2026-11-09 07:04 / 07:05 / 07:06 连续三次启动失败，日志为：
+
+```
+DesktopHostFatalError: dsh: startup failed: 4 required plugins did not activate
+Failed plugins (27): …
+  TypeError: Cannot read properties of null (reading 'entry')
+      at loaderCtx.on.global (…/node_modules/dsh-ops/lib/session-pwsh.js:19:25)
+```
+
+根因：`dsh-ops@0.3.0` 订阅 `internal/config`，回调里读 `this.entry`；宿主当时的 cordis 4.1.0
+不再给 hook 绑定 `this`，于是每个插件的配置解析都抛错，24 个插件 failed、52 个 pending。
+
+0.3.0 的四项修复/新增都直接来自这次事故的可复现证据：
+
+| 现象 | 0.3.0 的对应改动 |
+|---|---|
+| 归类只说「entry did not activate」，栈里明明写着 `dsh-ops` | 栈帧解析 + 建议改为「禁用该包」 |
+| 无法判断「上次是怎么跑起来的」 | 启动指纹 + `lastGood` + 自动 diff |
+| 静态预检 3 条规则一条都没覆盖 | 第 4 条规则：`internal/*` 订阅 |
+| 正常启动后仍误报「上次启动未完成」 | `confirmBoot` 定时器 |
+
+事故日志不属于分发内容，仅在开发时只读分析；本仓库不包含这些日志。
+
 ## 无第三方素材
 
 - 无第三方依赖（`dependencies` 与 `peerDependencies` 均为空，只用 Node 内置模块）
