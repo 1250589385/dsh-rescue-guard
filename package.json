@@ -1,6 +1,6 @@
 {
   "name": "dsh-rescue-guard",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "description": "DSH 启动救援与自我修复：启动前静态预检命令名冲突与缺失文件，保留配置快照，DSH 起不来时用独立 CLI（dsh-rescue）禁用可疑 bundle 并回滚清单。",
   "type": "module",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "lib",
     "bin",
     "locale",
+    "test",
     "icon.svg",
     "cordis.patch.yml",
     "README.md",
@@ -56,5 +57,21 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "author": {
+    "name": "raysnows",
+    "email": "r1250589385@163.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1250589385/dsh-rescue-guard.git"
+  },
+  "homepage": "https://github.com/1250589385/dsh-rescue-guard#readme",
+  "bugs": {
+    "url": "https://github.com/1250589385/dsh-rescue-guard/issues"
+  },
+  "scripts": {
+    "test": "node test/regression.mjs",
+    "check": "node --check index.js && node --check client.js"
   }
 }
