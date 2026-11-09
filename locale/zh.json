@@ -91,5 +91,8 @@
   "watchUninstall": "卸载开机自启",
   "watchReportExists": "上次崩溃的报告已生成",
   "watchOpenReport": "打开报告",
-  "watchHint": "守护平时零 CPU、不留历史记录；只在崩溃日志出现的那一刻生成一份覆盖式报告。"
+  "watchHint": "守护平时零 CPU、不留历史记录；只在崩溃日志出现的那一刻生成一份覆盖式报告。",
+  "driftTitle": "相对上次成功启动的变化（{n} 项）",
+  "driftHint": "这些是上次启动成功后改动过的东西；崩溃通常就在其中。",
+  "driftMore": "还有 {n} 项"
 }
