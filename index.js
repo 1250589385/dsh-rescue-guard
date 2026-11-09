@@ -21,12 +21,22 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerRoutes } from './lib/routes.js'
-import { beginBoot, readBoot, rescueDir, resolvePaths } from './lib/paths.js'
+import { beginBoot, confirmBoot, readBoot, rescueDir, resolvePaths } from './lib/paths.js'
 import { arm, confirmHealthyBoot, disarm, status } from './lib/safemode.js'
-import { createSnapshot, listSnapshots } from './lib/snapshot.js'
+import { createSnapshot, listSnapshots, shouldSnapshot } from './lib/snapshot.js'
+import { captureFingerprint, describeDiff, diffFingerprints } from './lib/fingerprint.js'
 
 /** How long after a start-up we consider it proven, when no route has been hit yet. */
 const HEALTHY_BOOT_GRACE_MS = 25_000
+
+/** `confirmBoot` behind a try: a marker write failure is never worth a boot failure. */
+function confirmBootSafe(profileDir, via) {
+  try {
+    return confirmBoot(profileDir, { via })
+  } catch {
+    return null
+  }
+}
 
 /**
  * Where this plugin is installed, so the panel can show a *working* CLI command.
@@ -57,6 +67,24 @@ function cliCommand() {
   return 'dsh-rescue diagnose（见插件 README）'
 }
 
+/**
+ * The Host install's `node_modules`, or null.
+ *
+ * Only the Desktop shell knows where it lives (`process.resourcesPath`), and only when running
+ * inside the app. Returning null is correct for a plain `dsh web`: first-party bundles then
+ * report `source: 'host'` with a null version instead of a fabricated one.
+ */
+function resolveHostModules() {
+  try {
+    const resources = process.resourcesPath
+    if (typeof resources !== 'string' || !resources) return null
+    const candidate = path.join(resources, 'app.asar', 'dsh', 'node_modules')
+    return existsSync(candidate) ? candidate : null
+  } catch {
+    return null
+  }
+}
+
 export function apply(ctx) {
   const paths = resolvePaths()
 
@@ -76,20 +104,55 @@ export function apply(ctx) {
   // install path is known, instead of letting the Client guess.
   const cliHint = cliCommand()
 
+  // The Host's own node_modules, so first-party bundles resolve instead of reporting "missing".
+  // `process.resourcesPath` is set by the Desktop shell; a plain `dsh web` has no such tree.
+  const hostModules = resolveHostModules()
+
+  let fingerprint = null
   try {
-    beginBoot(paths.profileDir, { pluginCount: 0, bundleCount })
+    fingerprint = captureFingerprint({ profileDir: paths.profileDir, hostModules })
+  } catch {
+    /* a fingerprint is diagnostic value only; never a reason to fail the boot */
+  }
+
+  try {
+    beginBoot(paths.profileDir, { pluginCount: 0, bundleCount, fingerprint })
 
     const previous = readBoot(paths.profileDir)
-    const previousDied = Boolean(previous?.previousCrashes)
+    // A pending marker is the failure signal. `previousCrashes` counts the streak, so it is only
+    // reported when it exceeds one — the first failure is already implied by `lastFailedAt`.
+    const previousDied = Boolean(previous?.pending)
     if (previousDied) {
-      ctx.logger?.warn?.(`[dsh-rescue] 上次启动未完成（${previous.lastFailedAt ?? '未知时间'}）。面板里可查看诊断。`)
+      const streak = Number(previous?.previousCrashes) || 1
+      ctx.logger?.warn?.(
+        `[dsh-rescue] 上次启动未完成（${previous.lastFailedAt ?? previous.previousAt ?? '时间未知'}）` +
+          (streak > 1 ? `，已连续 ${streak} 次` : '') +
+          '。面板里可查看诊断。'
+      )
+      // The diff is the actionable half: it names what changed since the last working boot.
+      try {
+        const lastGood = previous?.lastGood ?? null
+        const diff = diffFingerprints(lastGood?.fingerprint ?? null, fingerprint)
+        const lines = describeDiff(diff)
+        if (lines.length) {
+          ctx.logger?.warn?.(('[dsh-rescue] 相对上次成功启动的变化：\n  ' + lines.join('\n  ')))
+        }
+      } catch {
+        /* a diff that cannot be built must not break the boot marker already written */
+      }
     }
 
-    // Keep a snapshot per start-up, but only when the newest one is not already recent: a
-    // snapshot per launch would rotate the useful history out within minutes.
+    // Snapshot on start-up, but only when the newest one is older than the rotation gap: one per
+    // launch would rotate the useful history out within minutes.
     try {
       const existing = listSnapshots({ profileDir: paths.profileDir })
-      if (!existing.length) createSnapshot({ profileDir: paths.profileDir })
+      if (shouldSnapshot(existing)) {
+        createSnapshot({
+          profileDir: paths.profileDir,
+          hostVersion: fingerprint?.hostVersion ?? null,
+          hostVersionSource: fingerprint?.hostVersionSource ?? null,
+        })
+      }
     } catch {
       /* snapshotting is best effort */
     }
@@ -98,11 +161,35 @@ export function apply(ctx) {
       disposers.push(dispose)
     }
 
+    // Confirm the boot on a timer, not only when a route is hit.
+    //
+    // The marker used to be cleared exclusively from `routes.js`, i.e. only once a user opened the
+    // panel. Nothing else writes it, so every successful boot stayed `pending: true` and the *next*
+    // start-up reported "上次启动未完成" against a healthy installation (verified 2026-11-09:
+    // boot.at 08:08:11, still pending four minutes later with a 25 s grace). A boot that reaches
+    // this timer has applied every plugin and registered routes: that is the proof.
+    timers.push(
+      setTimeout(() => {
+        try {
+          const boot = readBoot(paths.profileDir)
+          if (boot?.pending !== true) return
+          confirmBootSafe(paths.profileDir, 'timer')
+        } catch {
+          /* a marker we cannot write must never break a running boot */
+        }
+      }, HEALTHY_BOOT_GRACE_MS)
+    )
+
     // Safe mode was armed before this launch, and this launch is now up: put the bundles back.
     // Deferring matters — restoring during apply would defeat the point of the reduced start.
+    //
+    // This deliberately does not rely on the confirm timer above having already fired: both
+    // timers share one delay, so correctness would rest on Node's insertion-order guarantee for
+    // equal-expiry timers. Confirming here makes this branch self-sufficient whatever the order.
     if (status({ profileDir: paths.profileDir }).armed) {
       const handle = setTimeout(() => {
         try {
+          if (readBoot(paths.profileDir)?.pending === true) confirmBootSafe(paths.profileDir, 'safe-mode-restore')
           const boot = readBoot(paths.profileDir)
           if (boot?.pending !== false) return // never confirmed healthy; keep safe mode armed
           const restored = confirmHealthyBoot({ profileDir: paths.profileDir })
