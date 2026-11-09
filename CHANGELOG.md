@@ -5,6 +5,77 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-11-09
+
+对 0.3.0 的代码审查结论落地。0.3.0 的三项 bug 修复经逐行核对属实并保留；本版修掉审查中
+复现出的两个真实缺陷，以及若干稳健性与体积问题。
+
+### 修复
+
+- **作用域包在 Windows 反斜杠路径下解析错成 `C:/Users`**（`lib/crash.js`）：作用域包名的
+  补救分支只按 `/` 切分，而 Node 在 Windows 上默认打印原生路径，于是
+  `C:\...\node_modules\@scope\pkg\lib\a.js` 被解析成包名 `C:/Users`，进而被当作「第三方
+  插件」写进报告与建议。改为按两种分隔符切分，并统一包内路径的分隔符风格。
+- **`pickCulprit` 指认的是调用方而非抛错方**（`lib/crash.js`）：原实现取**最外层**第三方
+  帧，但栈的位置不代表「谁抛的」。`plugin-a → plugin-b → host` 的链条里真正抛出的是
+  innermost 的 plugin-b，原实现会点名 plugin-a —— 而 CLI 的措辞是「可能性最高，先禁用它」，
+  照着做会禁用无辜插件。现改为 innermost 优先，并额外返回 `suspects`（完整嫌疑链，
+  从内到外）。11-09 那次只有一帧，所以旧实现侥幸正确，测试也因此漏掉。
+- **CLI 措辞从断言降级为怀疑**：'肇事插件' → '可疑插件'，并显式说明「帧只能证明当时在跑
+  谁的代码，不能证明责任归属」，同时列出完整调用链供人工判断。
+- 两个 25 秒定时器之间存在隐式时序依赖（安全模式还原要求前一个已把 `pending` 置 false）。
+  还原分支现在自行确认启动健康，不再依赖注册顺序。
+
+### 变更
+
+- **boot.json 体积减半**：持久化指纹时剥掉 `hostVersionCandidates`（解析过程的痕迹，
+  diff 用不到）。实测真实 profile：改前约 4KB → 现在约 1.7KB。仍在每次启动写入，但只写
+  真正会被读的部分。
+- `hostVersionCandidates` 去掉未使用的 `home` 参数，并把推测性环境变量（
+  `DSH_RESOURCES_PATH` / `DSH_VERSION` / `PORTABLE_EXECUTABLE_DIR` —— 审核 app.asar 时
+  出现 0 次）在注释里标明为兜底，主路径是已验证的 `process.resourcesPath`。
+- 删除无调用点的 `moduleCount` / `isDir` 导出。
+- 面板的漂移列表不再静默截断：超过 8 项时显示「还有 N 项」（四个词典都加了 `driftMore`）。
+- README 补上自检命令 `node test/regression.mjs`（`test/` 随包发布，就要说明怎么跑）。
+
+### 测试
+
+回归测试 16 → **24 项**，新增 8 项正好覆盖上面两个缺陷此前漏掉的盲区：
+
+- 反斜杠路径下的作用域包名（旧行为输出 `C:/Users`）
+- 多插件调用链应指认 innermost、`suspects` 顺序、官方帧不进嫌疑链
+- 正斜杠形式仍然正确（防止修一个坏一个）
+
+## [0.3.0] - 2026-11-09
+
+### 新增
+
+- **崩溃栈帧解析**（`lib/crash.js` 的 `extractFrames` / `pickCulprit`）：从崩溃日志的栈里抽出
+  第三方帧，报告「哪个包 → 哪个文件:行号」。2026-11-09 那次事故里，归类只给出「有 bundle 未能
+  激活」，而栈里第一行就写着 `dsh-ops/lib/session-pwsh.js:19` —— 有了这条，恢复从「跑 5 次
+  安全模式二分」变成「禁用这个包」。
+- **启动指纹与「相对上次成功启动的变化」**（新 `lib/fingerprint.js`）：每次启动记录宿主版本与
+  每个插件的解析版本，启动成功时存为 `lastGood`；下次启动失败时自动 diff，把
+  「dsh-ops 0.5.2 → 0.3.0」这样的变化直接写进日志、CLI 与面板。
+- **预检新增第 4 条规则**：检测插件对宿主私有事件（`internal/*`）的订阅。这类 API 没有兼容
+  承诺——本次事故正是 `dsh-ops@0.3.0` 钩 `internal/config` 后，cordis 4.1 不再绑定 `this` 导致。
+  正则锚定在订阅调用本身（`\.on('internal/…')`），实测对「普通 `this.entry` 类字段」零误报。
+- **快照记录宿主版本**（`meta.hostVersion`）：一份不知道是哪个宿主版本下生成的清单，回滚时无法
+  判断安不安全。
+- `package.json` 补齐 `author` / `repository` / `homepage` / `bugs`。
+
+### 修复
+
+- **`confirmBoot` 只由路由触发，导致 `pending` 永远清不掉**：正常启动后下次启动仍误报「上次启动
+  未完成」。现在 `apply` 里起一个 25 秒定时器无条件确认——能走到定时器，就证明所有插件已 apply
+  且路由已注册。
+- **`previousCrashes` 键名不一致**：写 `previousCrashes`、读 `crashes`，算术恒为 1，连崩 3 次
+  也只报 1 次。现在正确读取自身字段，连续崩溃会累加到 3。
+- **快照「只存一次」**：注释写的是「最新一份不够新才存」，代码是「一份都没有才存」，结果永远
+  保留安装当天的清单。新增 `shouldSnapshot()` 按时间间隔轮换。
+- **`entry_inactive` 的建议不再无脑指向二分**：栈里能定位到第三方包时，直接建议
+  `dsh-rescue disable <包>`。
+
 ## [0.2.1] - 2026-11-07
 
 ### 变更
