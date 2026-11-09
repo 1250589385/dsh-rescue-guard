@@ -91,5 +91,8 @@
   "watchUninstall": "Remove autostart",
   "watchReportExists": "A crash report from the last crash is available",
   "watchOpenReport": "Open report",
-  "watchHint": "The watch costs no CPU while idle and keeps no history. It writes one overwritten report the moment a crash log appears."
+  "watchHint": "The watch costs no CPU while idle and keeps no history. It writes one overwritten report the moment a crash log appears.",
+  "driftTitle": "Changed since the last healthy start-up ({n})",
+  "driftHint": "These are what moved since the last successful boot; the failure is usually among them.",
+  "driftMore": "and {n} more"
 }
