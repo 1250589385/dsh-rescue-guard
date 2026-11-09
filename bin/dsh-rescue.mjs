@@ -129,6 +129,10 @@ function advise({ crashes, scan, safe, manifestError }) {
     const names = scan.collisions.map((c) => c.name).join(', ')
     tips.push({ level: 'bad', text: `命令名冲突：${names}。历史上这类冲突会让插件 apply() 中断并把宿主搞挂。用 dsh-rescue disable <bundle> 关掉其中一个` })
   }
+  if (scan?.privateHooks?.length) {
+    const list = scan.privateHooks.map((h) => `${h.plugin}(${h.event})`).join(', ')
+    tips.push({ level: 'warn', text: `有插件订阅宿主私有事件：${list}。这类 API 没有版本兼容承诺——2026-11-09 的启动崩溃就是 dsh-ops@0.3.0 钩 internal/config 后，cordis 4.1 不再绑定 this 导致的。升级宿主前先确认这些插件有匹配的版本` })
+  }
   if (scan?.missingFiles?.length) {
     const one = scan.missingFiles[0]
     tips.push({ level: 'bad', text: `有插件在构造时读取不存在的文件（首个：${one.plugin} → ${one.path}）。这类 ENOENT 会让宿主启动即死。用 dsh-rescue disable ${one.plugin} 或重装该插件` })
@@ -136,7 +140,33 @@ function advise({ crashes, scan, safe, manifestError }) {
     tips.push({ level: 'warn', text: `出现 ${by.web_auth} 次「Web authentication failed」。这是桌面端启动握手被拒，常见于某个插件占了根路由或端口被占。先 dsh-rescue safe-mode on 再启动，能起来了再逐个 dsh-rescue enable 定位` })
   }
   if (by.entry_inactive) {
-    tips.push({ level: 'warn', text: `有 ${by.entry_inactive} 次「entry did not activate」——某个 bundle 行激活失败。safe-mode 后用 enable 二分定位` })
+    // When the stack names a third-party package, bisecting with safe mode is wasted work: the
+    // suspect is already visible. 2026-11-09: the dump said dsh-ops/lib/session-pwsh.js:19 in every
+    // one of the three crashes, yet the advice was still "bisect with safe-mode".
+    //
+    // Wording stays a suspicion, not a verdict: a stack frame proves which code was running, not
+    // which package is at fault. The chain is printed so a maintainer can judge; only the
+    // innermost frame is offered as the first thing to try.
+    const suspects = new Map()
+    for (const crash of Array.isArray(crashes) ? crashes : []) {
+      const frame = crash?.culprit
+      if (!frame || frame.firstParty) continue
+      const key = `${frame.package}/${frame.file}:${frame.line}`
+      if (!suspects.has(key)) suspects.set(key, frame.package)
+    }
+    if (suspects.size) {
+      const first = [...suspects.values()][0]
+      const all = [...new Set([...suspects.values()])].join(', ')
+      tips.push({
+        level: 'bad',
+        text:
+          `有 ${by.entry_inactive} 次「entry did not activate」，崩溃栈里出现了 ${all}。` +
+          `最可能的是最内层那一帧：先 dsh-rescue disable ${first} 再启动——这是最短的恢复路径，不必二分。` +
+          '若禁用后仍失败，再 dsh-rescue safe-mode on 逐个排查',
+      })
+    } else {
+      tips.push({ level: 'warn', text: `有 ${by.entry_inactive} 次「entry did not activate」——某个 bundle 行激活失败。safe-mode 后用 enable 二分定位` })
+    }
   }
   if (by.renderer_dead) {
     tips.push({ level: 'warn', text: '有渲染进程被杀（killed）的记录，通常是内存不足或被外部结束，与本插件无关，可查系统事件日志' })
@@ -186,6 +216,37 @@ function printCrashes(crashes) {
     info(paint(C.dim, '冲突的命令名：'))
     for (const name of new Set(clashes.map((c) => c.command))) console.log(`      /${name}`)
   }
+
+  // The culprit frame is the single most actionable line in a dump: the class names say what
+  // kind of failure it was, the frame says whose code was executing. 2026-11-09: classification
+  // reported "entry did not activate" while the stack already read `dsh-ops/lib/session-pwsh.js:19`.
+  //
+  // Show the whole non-host chain, innermost first, and label it as a suspicion. A frame proves
+  // which code was running — not which package is at fault — and an over-confident list sends the
+  // user to disable an innocent plugin.
+  const culprits = new Map()
+  for (const crash of crashes) {
+    const suspectList = Array.isArray(crash?.suspects) && crash.suspects.length
+      ? crash.suspects
+      : (crash?.culprit && !crash.culprit.firstParty ? [crash.culprit] : [])
+    if (!suspectList.length) continue
+    for (const frame of suspectList) {
+      const key = `${frame.package}/${frame.file}:${frame.line}`
+      if (!culprits.has(key)) culprits.set(key, { frame, count: 0, rank: suspectList.indexOf(frame) })
+      culprits.get(key).count += 1
+    }
+  }
+  if (culprits.size) {
+    console.log()
+    warn('可疑插件（崩溃栈里的第三方帧，最内层在最前）：')
+    for (const { frame, count, rank } of culprits.values()) {
+      const at = `${frame.package}/${frame.file}:${frame.line}`
+      const fn = frame.fn ? paint(C.dim, `  (在 ${frame.fn})`) : ''
+      const tag = rank === 0 ? paint(C.bold, ' ← 最可能') : ''
+      console.log(`      ${at}  ×${count}${fn}${tag}`)
+    }
+    info(paint(C.dim, '    → 先试禁用「最可能」那个包；帧只能证明当时在跑谁的代码，不能证明责任归属。'))
+  }
 }
 
 function printScan(scan) {
@@ -220,6 +281,15 @@ function printScan(scan) {
     for (const item of scan.routeShadows.slice(0, 6)) {
       console.log(`      ${item.plugin}  path=${JSON.stringify(item.path)} kind=${item.kind}`)
     }
+  }
+
+  if (scan.privateHooks?.length) {
+    console.log()
+    warn(`订阅了宿主私有事件的插件 ${scan.privateHooks.length} 处（宿主升级时可能直接崩）：`)
+    for (const item of scan.privateHooks.slice(0, 8)) {
+      console.log(`      ${item.plugin} → ${item.event}  ${paint(C.dim, `(${item.file}:${item.line})`)}`)
+    }
+    info(paint(C.dim, '    internal/* 是没有兼容承诺的 Loader 内部事件。先确认该插件声明支持当前宿主版本，再决定是否升级宿主。'))
   }
 
   if (scan.warnings?.length) {
