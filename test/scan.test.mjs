@@ -164,7 +164,9 @@ test('scanBundle skips POSIX-only absolute paths on Windows', () => {
 })
 
 test('scanBundle tolerates a missing directory and junk arguments', () => {
-  const empty = { commands: [], missingFiles: [], routeShadows: [], warnings: [] }
+  // `privateHooks` joined the result shape in 0.4.0-era work (internal/* subscription scan);
+  // the empty result must carry it too, so consumers can iterate without a guard.
+  const empty = { commands: [], missingFiles: [], routeShadows: [], privateHooks: [], warnings: [] }
   assert.deepEqual(scanBundle(join(tmpRoot, 'nope')), empty)
   assert.deepEqual(scanBundle(), empty)
   assert.deepEqual(scanBundle(null), empty)
