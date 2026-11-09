@@ -84,6 +84,9 @@ window.__ModuleLoader__.load({
       bootOkAt: 'Confirmed healthy at {time}',
       bootLastFailedAt: 'The previous start-up failed at {time}',
       bootPreviousCrashes: '{n} consecutive failed start-ups',
+      driftTitle: 'Changed since the last healthy start-up ({n})',
+      driftHint: 'These are what moved since the last successful boot; the failure is usually among them.',
+      driftMore: 'and {n} more',
       bootProfile: 'Profile: {dir}',
       crashesTitle: 'Crash history',
       crashesTotal: '{n} crash logs found',
@@ -177,6 +180,9 @@ window.__ModuleLoader__.load({
       bootOkAt: '已于 {time} 确认正常',
       bootLastFailedAt: '上一次启动失败于 {time}',
       bootPreviousCrashes: '连续 {n} 次启动失败',
+      driftTitle: '相对上次成功启动的变化（{n} 项）',
+      driftHint: '这些是上次启动成功后改动过的东西；崩溃通常就在其中。',
+      driftMore: '还有 {n} 项',
       bootProfile: '配置目录：{dir}',
       crashesTitle: '崩溃历史',
       crashesTotal: '共 {n} 份崩溃日志',
@@ -407,6 +413,8 @@ window.__ModuleLoader__.load({
       '.drg-boot[data-state="bad"]{border-color:var(--dsw-alias-state-error-primary,var(--dsh-danger,#ec1313))}',
       '.drg-boot[data-state="good"]{border-color:var(--dsw-alias-state-success-primary,var(--dsh-success,#22c55e))}',
       '.drg-boot-line{display:flex;align-items:baseline;gap:6px;margin:0;font-size:13px;line-height:20px;font-weight:600}',
+        '.drg-drift{margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.12)))}',
+        '.drg-meta-title{margin:0 0 4px;font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#eee))}',
       '.drg-boot[data-state="bad"] .drg-boot-line{color:var(--dsw-alias-state-error-primary,var(--dsh-danger,#ec1313))}',
       '.drg-boot[data-state="good"] .drg-boot-line{color:var(--dsw-alias-state-success-primary,var(--dsh-success,#22c55e))}',
       '.drg-boot[data-state="none"] .drg-boot-line{color:var(--dsw-alias-label-secondary,var(--dsh-text-secondary,#b6bcc7))}',
@@ -887,6 +895,19 @@ window.__ModuleLoader__.load({
             : null,
           isObject(boot) && asNumber(boot.previousCrashes, 0) > 1
             ? h('p', { className: 'drg-boot-meta' }, t('bootPreviousCrashes', { n: asNumber(boot.previousCrashes, 0) }))
+            : null,
+          driftLines.length > 0
+            ? h('div', { className: 'drg-drift' },
+                h('p', { className: 'drg-meta-title' }, t('driftTitle', { n: driftLines.length })),
+                ...driftLines.slice(0, 8).map((line, index) =>
+                  h('p', { key: 'drift-' + index, className: 'drg-boot-meta' }, asString(line, '')),
+                ),
+                /* Never truncate silently: the title counts every line, so a list that stops at
+                 * eight without saying so reads as "that was all of it". */
+                driftLines.length > 8
+                  ? h('p', { className: 'drg-boot-meta drg-muted' }, t('driftMore', { n: driftLines.length - 8 }))
+                  : null,
+              )
             : null,
           profileDir === ''
             ? null
