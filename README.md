@@ -38,11 +38,31 @@
 DSH 起不来时用这个。它只用 Node 内置模块，不需要 DSH。
 
 ```bat
-:: 双击运行，或从命令行
-D:\deepseek-workspaces\work\dsh-rescue-guard\bin\dsh-rescue.cmd diagnose
+:: 方式一：双击 bin\rescue-console.cmd（菜单式，最省事）
+:: 方式二：从命令行跑，路径取决于你装在哪
+%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-rescue-guard\bin\dsh-rescue.cmd diagnose
 ```
 
-`dsh-rescue.cmd` 会自动探测 Node 运行时（本机 Node 不在 PATH，DSH 自带一份）。
+**路径不是固定的**，按你的实际安装位置换：
+
+| 装法 | `bin` 目录在哪 |
+|---|---|
+| `dsh plugin add dsh-rescue-guard`（默认 profile） | `%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-rescue-guard\bin` |
+| 指定了别的 profile | `%USERPROFILE%\.dsh\profiles\<profile名>\node_modules\dsh-rescue-guard\bin` |
+| 从源码目录跑（开发时） | `<你 clone 的位置>\bin` |
+
+不确定装在哪？任选一条：
+
+```bat
+:: ① 直接找（Windows）
+dir /s /b %USERPROFILE%\.dsh\*dsh-rescue-guard\bin\dsh-rescue.cmd
+
+:: ② 让桌面入口自己带路径（跑一次），之后双击桌面那个文件
+cd <插件目录> && node bin\install-desktop.mjs
+```
+
+`bin\dsh-rescue.cmd` 与 `bin\rescue-console.cmd` 都会**自己探测 Node 运行时**
+（很多机器上 Node 不在 PATH，但 DSH 自带一份），所以不需要你配环境变量。
 
 ```
 dsh-rescue diagnose                 看崩溃原因 + 预检 + 给建议（先跑这个）
@@ -50,6 +70,17 @@ dsh-rescue crashes [--limit N]      只列归类后的崩溃历史
 dsh-rescue scan                     只跑启动前静态预检
 dsh-rescue safe-mode status|on|off  安全模式
 dsh-rescue snapshot create|list|restore <id>
+dsh-rescue cookies                  量 Cookie 头体积（「认证失败」多半是它）
+dsh-rescue cookies --prune          清理陈旧 dsh-auth 令牌（先退出 DSH）
+dsh-rescue cookies --prune --keep 3 只保留最新 3 条
+dsh-rescue cookies --from-backup    DSH 在跑时读上次备份估算
+dsh-rescue cookies --install-task   只打印每日自动清理的命令，不执行
+dsh-rescue cookies --policy          查看自动清理策略（与设置面板同一份）
+dsh-rescue cookies --auto on|off     开关自动清理
+dsh-rescue cookies --keep-set N      持久化保留数
+dsh-rescue cookies --auto-run        按策略执行一次（计划任务用）
+dsh-rescue menu                     交互式救援菜单（桌面入口调用的就是它）
+dsh-rescue install-desktop          在桌面创建双击即开的入口
 dsh-rescue disable <bundle>         把某个 bundle 移出启动列表
 dsh-rescue enable <bundle>          加回启动列表
 
@@ -173,6 +204,125 @@ DSH 正常时，面板显示：上次启动是否正常、崩溃历史归类、�
 
 ---
 
+## 桌面救援台（DSH 起不来时双击它）
+
+DSH 拒绝启动的那一刻，图形界面正是坏掉的东西——这时候用户唯一能做的动作是
+**在桌面上双击一个东西**。所以本插件自带一个菜单式救援台：
+
+```bash
+dsh-rescue-desktop          # 或 node bin/install-desktop.mjs
+```
+
+会在桌面创建 `DSH 救援台.cmd`（Windows；macOS/Linux 为 `.sh`），双击后是编号菜单：
+
+```
+  [1] 一键诊断        崩溃原因 + 预检 + 该做什么（推荐先点这个）
+  [2] 查 Cookie 体积   「Web authentication failed」多半是它
+  [3] 清理 Cookie 令牌  修 431 头超限（需先退出 DSH）
+  [4] 看崩溃历史      只列归类后的崩溃
+  [5] 启动前预检      命令冲突 / 缺失文件 / 私有事件
+  [6] 安全模式        下次只加载官方插件
+  [7] 快照            备份 / 列出 / 回滚 profile 配置
+  [8] 禁用/启用插件    把可疑插件从启动列表摘掉
+```
+
+它自己探测 Node 运行时（优先用 DSH 自带的那份，macOS/Linux 上优先 PATH），
+不依赖 `PATH`、不依赖 DSH 能启动、不改注册表、不加开机自启。
+删掉桌面那个文件就完全还原。
+
+## 自动清理策略（设置面板 / 控制台 / 配置文件，同一份真源）
+
+Cookie 清理的策略存在 **`~/.dsh/rescue-guard/config.json`**，不是宿主的 settings 命名空间。
+理由很实际：这个策略的全部价值是「下次 DSH 起不来时已经生效」，而那时宿主 settings 读不到，
+CLI 必须能读到——所以它必须是一个不依赖宿主的文件。
+
+三个入口改的都是这一份：
+
+### ① 设置面板
+
+**设置 → 启动救援**（和「Our Free Model」「wb400修复」「记忆」同一列）：
+
+- 自动清理开关
+- 保留最新令牌数（0 = 全删）
+- 「立即清理」按钮（DSH 在跑时会明确告诉你被占用）
+
+### ② 控制台 CLI
+
+```bash
+dsh-rescue cookies --policy        # 查看当前策略
+dsh-rescue cookies --auto on       # 打开自动清理
+dsh-rescue cookies --auto off      # 关闭
+dsh-rescue cookies --keep-set 3    # 持久化「保留最新 3 条」
+dsh-rescue cookies --auto-run      # 按策略执行一次（给计划任务用）
+```
+
+### ③ 救援台菜单
+
+双击 `bin\rescue-console.cmd`：`[9]` 看策略、`[a]` 开、`[b]` 关。
+
+### 配置项
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `cookies.autoClean` | `false` | 超阈值时自动清理（下次干净启动生效）|
+| `cookies.keepNewest` | `0` | 保留最新 N 条令牌，0 = 全删 |
+| `cookies.warnRatio` | `0.6` | 达到上限的百分之多少开始预警 |
+| `cookies.confirmBeforeClean` | `true` | 清理前是否要确认 |
+
+文件缺失或损坏时自动回落默认值（不报错、不阻塞救援）；写入是深合并 + 原子落盘，
+不会因为只改了一个字段就把其它字段重置。
+
+### 想定时自动清理
+
+`dsh-rescue cookies --install-task` 会**打印**（不执行）一条 `schtasks` 命令，
+内容是把 `--auto-run` 挂到每天一次。它会先读策略：没开自动清理就直接跳过。
+
+## Cookie 堆积：那个骗了你三周的"认证失败"
+
+2026-11-10 的真实事故：弹窗说 `desktop welcome: Web authentication failed`，看起来像账号或
+凭据出了问题，实际坏的是**请求头体积**。
+
+机制是这样的：
+
+1. 每次 Desktop 端启动，都会把 launch URL 换成一个新的 `dsh-auth-<32字节随机>` cookie，
+   绑在 `127.0.0.1`、有效期 30 天；
+2. Chromium 不会删除旧的（它们没到期，只是不再被用）；
+3. 于是每天涨约 3 条，三周后累积到 **71 条 / Cookie 头 16117 字节**，加上其它请求头
+   共约 16600 字节，越过 Node 默认 `maxHeaderSize` = 16 KiB；
+4. Host 回 `HTTP/1.1 431 Request Header Fields Too Large`，
+   `connectDesktopWelcome` 看到 `!response.ok` 就抛「认证失败」——**文案完全没提体积**；
+5. 失败后客户端重试，每次重试再加一条 cookie，形成恶化闭环。
+
+`cookies` 子命令把这个不可见的量量出来：
+
+```
+$ dsh-rescue cookies --from-backup
+Cookie 体积（决定能否启动握手）
+  上限：Node 默认 maxHeaderSize = 16384 字节（Cookie 头还要加上其它请求头）
+  ✗ 71 条 cookie（dsh-auth-* 71 条） → Cookie 头约 16117 字节（98%），加其它头约 16717 字节
+      dsh-auth 令牌龄期：2026-10-19T02:02:45 → 2026-11-10T03:08:52
+
+  ✗ Cookie 头加上其它请求头已超过 16KB：Host 返回 431，桌面端只会显示「Web authentication failed」。
+      → 这就是「认证失败」却查不出账号问题的原因：坏的是请求头体积，不是凭据。
+```
+
+清理：
+
+```bash
+dsh-rescue cookies --prune --dry-run   # 先看会删多少
+dsh-rescue cookies --prune             # 全删陈旧令牌（会先备份）
+dsh-rescue cookies --prune --keep 3    # 只保留最新 3 条
+```
+
+几个必须知道的边界：
+
+- **必须先完全退出 DSH**（含托盘图标）。Chromium 独占打开 cookie 库，就地清理会
+  `EBUSY` 失败或写进去被覆盖。CLI 会检测进程并拒绝执行。
+- 每次清理前都会把库备份到 `~/.dsh/backups/dsh-cookies-<时间戳>.db`。
+- 清理只删 `dsh-auth-*`，**不动其它 cookie**（登录态等）。
+- DSH 正在跑时读不了实时库，用 `--from-backup` 读上次备份来估算"上次有多严重"。
+- 想自动化：`dsh-rescue cookies --install-task` 会**打印**（不执行）一条 `schtasks` 命令。
+
 ## 崩溃定位：从栈里认人
 
 崩溃日志的 `--- error ---` 段第一行是被脱敏过的散文（"4 required plugins did not activate"），
@@ -248,7 +398,12 @@ WARN [dsh-rescue] 相对上次成功启动的变化：
 dsh plugin add dsh-rescue-guard
 ```
 
-CLI 在项目目录的 `bin/dsh-rescue.cmd`。建议记下这个路径，DSH 崩了就用它。
+CLI 在**插件安装目录**的 `bin/dsh-rescue.cmd`（不是本项目目录，因为在别处 clone 的位置与此无关）。
+想知道确切路径就运行下面这条，它会打印并帮你放到桌面：
+
+```bash
+node bin/install-desktop.mjs
+```
 
 ## 自检（本包内含测试）
 
@@ -256,7 +411,7 @@ CLI 在项目目录的 `bin/dsh-rescue.cmd`。建议记下这个路径，DSH 崩
 代价很高——它给你的建议是要照做的。无任何依赖，跑一条命令即可：
 
 ```bash
-node test/regression.mjs     # 期望：全部通过（24 项）
+node test/regression.mjs     # 期望：全部通过（44 项）
 ```
 
 覆盖的是**真实事故反推**的行为，不是构造的用例，例如：
