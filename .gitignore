@@ -1,3 +1,6 @@
 node_modules/
 *.tgz
 .rescue/
+*.log
+.DS_Store
+Thumbs.db
