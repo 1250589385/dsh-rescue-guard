@@ -29,6 +29,8 @@ import { captureFingerprint, describeDiff, diffFingerprints } from './lib/finger
 import { inspectCookieDatabase, inspectCookies, MAX_HEADER_BYTES, newestCookieBackup } from './lib/cookies.js'
 import { readConfig } from './lib/config.js'
 import { offerDesktopRescue, writeApplyError } from './lib/desktop-offer.js'
+import { preflight, writePostUpdateReport } from './lib/preflight.js'
+import { scanProfile } from './lib/scan.js'
 
 /** How long after a start-up we consider it proven, when no route has been hit yet. */
 const HEALTHY_BOOT_GRACE_MS = 25_000
@@ -144,6 +146,33 @@ export function apply(ctx) {
       } catch {
         /* a diff that cannot be built must not break the boot marker already written */
       }
+    }
+
+    /* First start after a version change: run the preflight and leave a report. An update is
+     * exactly when bundles stop resolving, so the check belongs right here — before the user
+     * hits the failure and has no idea which plugin broke. */
+    try {
+      const previousBoot = readBoot(paths.profileDir)
+      const wasVersion = previousBoot?.lastGood?.fingerprint?.hostVersion ?? previousBoot?.fingerprint?.hostVersion ?? null
+      const nowVersion = fingerprint?.hostVersion ?? null
+      if (wasVersion && nowVersion && wasVersion !== nowVersion) {
+        const result = preflight({ profileDir: paths.profileDir, home: paths.home, scan: scanProfile, boot: previousBoot, fingerprint })
+        let diffLines = []
+        try {
+          diffLines = describeDiff(diffFingerprints(previousBoot?.lastGood?.fingerprint ?? null, fingerprint))
+        } catch {
+          /* the report still lands without the diff */
+        }
+        const report = writePostUpdateReport(paths.profileDir, {
+          previousVersion: wasVersion,
+          currentVersion: nowVersion,
+          findings: result.findings,
+          diffLines,
+        })
+        if (report) ctx.logger?.warn?.(`[dsh-rescue] DSH ${wasVersion} → ${nowVersion}，已生成体检报告：${report}`)
+      }
+    } catch {
+      /* the report is a courtesy; never a reason to fail the boot */
     }
 
     // Snapshot on start-up, but only when the newest one is older than the rotation gap: one per
