@@ -405,6 +405,28 @@ console.log('\n[11] cookie 库选择（空分区库不能盖过真正的库）')
 }
 
 console.log('\n' + '='.repeat(60))
+console.log('\n[12] 源码模式锁：服务注入与客户端守卫（真实宿主两次事故的教训）')
+{
+  const readSource = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+  const host = readSource('index.js')
+  const client = readSource('client.js')
+
+  check('宿主半边：路由注册必须在 ctx.inject(["webServer"]) 内', () => {
+    // 直接摸 ctx.webServer 会被宿主以 "without inject" 拒绝（2026-11-11 黑匣子实证），
+    // 且降级是静默的 —— 整个宿主半边从此 404。模式必须锁住。
+    assert(host.includes("ctx.inject(['webServer']"), 'index.js 必须用 ctx.inject 声明 webServer')
+  })
+  check('宿主半边：apply 降级必须写黑匣子', () => {
+    assert(host.includes('writeApplyError'), '降级原因必须落盘（.rescue/apply-error.txt）')
+  })
+  check('客户端半边：settings.section 注册必须走 guard', () => {
+    assert(client.includes("guard('settings section'"), '设置分区注册必须被守卫')
+  })
+  check('客户端半边：必须存在错误席位组件', () => {
+    assert(client.includes('function ErrorSeat'), '注册失败必须可见，不能静默')
+  })
+}
+
 if (failures.length === 0) {
   console.log(`全部通过：${passed} 项`)
   process.exit(0)
