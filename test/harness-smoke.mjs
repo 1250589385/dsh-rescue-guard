@@ -43,6 +43,34 @@ process.env.APPDATA = path.join(profile, '.smoke-appdata')
 import { mkdirSync } from 'node:fs'
 mkdirSync(path.join(process.env.APPDATA, '@deepseek-ai', 'dsh-desktop', 'logs'), { recursive: true })
 
+// Seed a minimal Chromium cookie database so the 0.4.0 cookie routes exercise the real
+// measurement path — stage a copy, open it, count `dsh-auth-*` tokens — instead of whatever
+// cookies happen to exist on the machine running the test. An empty partition jar sits next to
+// it on purpose: the 0.5.0 fix is that this 0-byte jar must not mask the real one when the
+// cleaner picks the worst database.
+const cookieDbDir = path.join(process.env.APPDATA, '@deepseek-ai', 'dsh-desktop', 'Network')
+mkdirSync(cookieDbDir, { recursive: true })
+const { DatabaseSync } = await import('node:sqlite')
+const cookieDb = new DatabaseSync(path.join(cookieDbDir, 'Cookies'))
+cookieDb.exec('CREATE TABLE cookies (name TEXT, value TEXT, creation_utc INTEGER, expires_utc INTEGER)')
+const insertCookie = cookieDb.prepare(
+  'INSERT INTO cookies (name, value, creation_utc, expires_utc) VALUES (?, ?, ?, ?)',
+)
+const TOKENS = 60
+for (let i = 0; i < TOKENS; i += 1) {
+  // 60 tokens × (11 name + 260 value + 2) ≈ 16.4 KB of Cookie header; with the ~600-byte
+  // reserve for other headers the whole request is well past the 16 KiB limit, so the fixture
+  // lands in `broken` — the exact condition of the 2026-11-10 incident.
+  insertCookie.run(`dsh-auth-${i}`, 't'.repeat(260), 133_000_000_000_000_000 + i * 1_000_000, 133_500_000_000_000_000)
+}
+cookieDb.close()
+
+const partitionDb = path.join(process.env.APPDATA, '@deepseek-ai', 'dsh-desktop', 'Partitions', 'empty', 'Network', 'Cookies')
+mkdirSync(path.dirname(partitionDb), { recursive: true })
+const emptyDb = new DatabaseSync(partitionDb)
+emptyDb.exec('CREATE TABLE cookies (name TEXT, value TEXT, creation_utc INTEGER, expires_utc INTEGER)')
+emptyDb.close()
+
 const { apply } = await import(PLUGIN)
 const dispose = apply(ctx)
 
@@ -110,6 +138,27 @@ assert.ok(commands.includes('rescue'), 'the /rescue command must be registered')
 const boot = JSON.parse(readFileSync(path.join(profile, '.rescue', 'boot.json'), 'utf8'))
 assert.equal(boot.pending, false, 'served requests mark the boot healthy')
 
+// 8) the two 0.4.0 endpoints actually answer.
+const cfgRead = await resFor('/config.json')
+assert.equal(cfgRead.ok, true, 'GET /config.json must answer')
+assert.ok(cfgRead.config && cfgRead.config.cookies, 'config.json must carry the cookie policy')
+
+const cleaned = await resFor('/cookies/clean.json', makeBody({ keepNewest: 0, dryRun: true }))
+assert.equal(cleaned.ok, true, 'cookies/clean.json must answer (dry-run)')
+// The seeded jar holds 60 dsh-auth tokens. If the empty partition jar were picked instead — the
+// exact 0.5.0 masking bug — these would all read zero and the level would be `ok`.
+assert.equal(cleaned.result?.before, TOKENS, 'the seeded jar must be the one measured')
+assert.equal(cleaned.result?.dryRun, true, 'dry-run must not touch the database')
+assert.equal(cleaned.result?.removed ?? 0, 0, 'dry-run removes nothing')
+
+// The masking fix, through the measurement path: the worst jar must be the seeded one
+// (60 tokens, broken), not the empty partition jar that also exists in this fixture.
+const diag = await resFor('/diagnose.json')
+const jar = diag.cookies?.report ?? {}
+assert.equal(jar.authCookies, TOKENS, 'the seeded jar must be measured, not the empty partition one')
+assert.equal(jar.level, 'broken', '60 tokens must measure as a real problem')
+
+const routeCount = routes.size
 dispose()
 
 function makeBody(object) {
@@ -123,5 +172,7 @@ function makeBody(object) {
   }
 }
 
-console.log('smoke OK — routes: 4, command: rescue, safe-mode round-trip byte-identical')
+// 0.4.0 added config.json and cookies/clean.json; count instead of hardcoding so the next
+// route does not silently make this line a lie.
+console.log('smoke OK — routes: ' + routeCount + ', command: rescue, safe-mode round-trip byte-identical')
 rmSync(profile, { recursive: true, force: true })
