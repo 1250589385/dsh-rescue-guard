@@ -53,6 +53,8 @@ window.__ModuleLoader__.load({
     const SNAPSHOT_URL = PREFIX + '/snapshot.json';
     const SAFE_MODE_URL = PREFIX + '/safe-mode.json';
     const WATCH_URL = PREFIX + '/watch.json';
+    const CONFIG_URL = PREFIX + '/config.json';
+    const COOKIE_CLEAN_URL = PREFIX + '/cookies/clean.json';
     /* The rescue command line is supplied by the Host in `diagnose.json`, because only it
      * knows where the plugin was installed. This is just the fallback shown before the first
      * successful fetch. */
@@ -86,6 +88,32 @@ window.__ModuleLoader__.load({
       bootPreviousCrashes: '{n} consecutive failed start-ups',
       driftTitle: 'Changed since the last healthy start-up ({n})',
       driftHint: 'These are what moved since the last successful boot; the failure is usually among them.',
+      cookiesTitle: 'Cookie jar',
+      cookiesNone: 'No cookie database on this machine yet.',
+      cookiesUnreadable: 'Cannot read the cookie database while DSH is running (Chromium holds it open).',
+      cookiesVolume: '{auth} dsh-auth tokens · Cookie header {total} B · with other headers {projected} B / {max} B limit',
+      cookiesFromBackup: 'Measured from the newest prune backup ({time}).',
+      cookiesBroken: 'This exceeds Node\'s 16 KiB maxHeaderSize: the Host answers 431 and the app shows "Web authentication failed".',
+      cookiesPruneHint: ' — quit DSH first, then run',
+      settingsNav: 'Rescue Guard',
+      settingsTitle: 'Startup rescue',
+      settingsIntro: 'Cookie auto-clean policy. Stored in ~/.dsh/rescue-guard/config.json so the standalone CLI honours the same values when the app cannot start.',
+      settingsAutoClean: 'Clean auth cookies automatically',
+      settingsAutoCleanDesc: 'When the Cookie header approaches Node\'s 16 KiB limit, the next clean start-up removes stale dsh-auth tokens.',
+      settingsKeepNewest: 'Keep newest tokens',
+      settingsKeepNewestDesc: 'How many of the most recent dsh-auth tokens to keep. 0 removes all of them.',
+      settingsPruneNow: 'Clean now',
+      settingsPruneNowDesc: 'Quit the app completely first: Chromium holds the cookie database open while it runs.',
+      settingsPruneButton: 'Clean now',
+      settingsSaved: 'Saved.',
+      settingsLoadFailed: 'Could not read settings: {message}',
+      settingsSaveFailed: 'Could not save: {message}',
+      settingsCleanDone: 'Removed {removed} tokens, {after} left.',
+      settingsCleanLocked: 'The cookie database is locked — quit the app completely (including the tray icon) and try again.',
+      settingsCleanFailed: 'Clean failed: {message}',
+      settingsPath: 'Settings file: ~/.dsh/rescue-guard/config.json',
+      on: 'On',
+      off: 'Off',
       driftMore: 'and {n} more',
       bootProfile: 'Profile: {dir}',
       crashesTitle: 'Crash history',
@@ -182,6 +210,32 @@ window.__ModuleLoader__.load({
       bootPreviousCrashes: '连续 {n} 次启动失败',
       driftTitle: '相对上次成功启动的变化（{n} 项）',
       driftHint: '这些是上次启动成功后改动过的东西；崩溃通常就在其中。',
+      cookiesTitle: 'Cookie 体积',
+      cookiesNone: '这台机器还没有 cookie 数据库。',
+      cookiesUnreadable: 'DSH 运行期间读不到 cookie 数据库（Chromium 独占打开）。先完全退出 DSH。',
+      cookiesVolume: '{auth} 条 dsh-auth 令牌 · Cookie 头 {total} 字节 · 加其它头 {projected} / {max} 字节',
+      cookiesFromBackup: '按最近一次清理备份估算（{time}）。',
+      cookiesBroken: '已超过 Node 的 16 KiB maxHeaderSize：Host 回 431，界面只会显示「Web authentication failed」。',
+      cookiesPruneHint: ' — 先退出 DSH，再执行',
+      settingsNav: '启动救援',
+      settingsTitle: '启动救援',
+      settingsIntro: 'Cookie 自动清理策略。存在 ~/.dsh/rescue-guard/config.json，这样 DSH 起不来时独立 CLI 也能读到同一份设置。',
+      settingsAutoClean: '自动清理认证 Cookie',
+      settingsAutoCleanDesc: 'Cookie 头接近 Node 的 16 KiB 上限时，下次干净启动会删掉陈旧的 dsh-auth 令牌。',
+      settingsKeepNewest: '保留最新令牌数',
+      settingsKeepNewestDesc: '保留最近多少条 dsh-auth 令牌；0 表示全部删除。',
+      settingsPruneNow: '立即清理',
+      settingsPruneNowDesc: '请先完全退出 DSH：运行期间 Chromium 独占这个 cookie 库。',
+      settingsPruneButton: '立即清理',
+      settingsSaved: '已保存。',
+      settingsLoadFailed: '读取设置失败：{message}',
+      settingsSaveFailed: '保存失败：{message}',
+      settingsCleanDone: '已删除 {removed} 条，剩余 {after} 条。',
+      settingsCleanLocked: 'cookie 数据库被占用 —— 请完全退出 DSH（含托盘图标）后重试。',
+      settingsCleanFailed: '清理失败：{message}',
+      settingsPath: '设置文件：~/.dsh/rescue-guard/config.json',
+      on: '开',
+      off: '关',
       driftMore: '还有 {n} 项',
       bootProfile: '配置目录：{dir}',
       crashesTitle: '崩溃历史',
@@ -413,6 +467,21 @@ window.__ModuleLoader__.load({
       '.drg-boot[data-state="bad"]{border-color:var(--dsw-alias-state-error-primary,var(--dsh-danger,#ec1313))}',
       '.drg-boot[data-state="good"]{border-color:var(--dsw-alias-state-success-primary,var(--dsh-success,#22c55e))}',
       '.drg-boot-line{display:flex;align-items:baseline;gap:6px;margin:0;font-size:13px;line-height:20px;font-weight:600}',
+        '.drg-section{margin-top:14px}',
+        '.drg-flag{margin:0;font-size:13px;line-height:20px}',
+        '.drg-settings{padding:16px 4px;max-width:640px}',
+        '.drg-settings-title{margin:0 0 4px;font-size:15px;line-height:22px;font-weight:600}',
+        '.drg-setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.10)))}',
+        '.drg-setting-text{min-width:0;flex:1}',
+        '.drg-setting-label{margin:0;font-size:13px;line-height:20px;font-weight:500}',
+        '.drg-setting-desc{margin:2px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,var(--dsh-text-secondary,#9aa))}',
+        '.drg-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;flex:none}',
+        '.drg-input{width:72px;flex:none;padding:4px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.16)));background:transparent;color:inherit;font-size:13px}',
+        '.drg-settings-msg{margin-top:10px;color:var(--dsw-alias-state-business-primary,var(--dsh-brand,#4a9eff))}',
+        '.drg-flag-bad{color:var(--dsw-alias-state-error-primary,var(--dsh-error,#ff6b6b))}',
+        '.drg-flag-warn{color:var(--dsw-alias-state-warning-primary,var(--dsh-warning,#e6a700))}',
+        '.drg-cmd{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin:6px 0 0}',
+        '.drg-muted{opacity:.7}',
         '.drg-drift{margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.12)))}',
         '.drg-meta-title{margin:0 0 4px;font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#eee))}',
       '.drg-boot[data-state="bad"] .drg-boot-line{color:var(--dsw-alias-state-error-primary,var(--dsh-danger,#ec1313))}',
@@ -862,6 +931,19 @@ window.__ModuleLoader__.load({
       const snapshots = isObject(report) ? asArray(report.snapshots) : [];
       const profileDir = isObject(report) ? asString(report.profileDir, '') : '';
 
+      /* What changed since the last boot that worked. The Host builds this diff so the panel and
+       * the CLI report identical lines; the panel never recomputes it from raw fingerprints.
+       *
+       * 0.3.1 shipped this block's consumer without its producer: `driftLines` was read five
+       * times below and never declared, so opening the panel threw a ReferenceError before it
+       * could render anything. Restored here, together with the cookie report. */
+      const drift = isObject(report) && isObject(report.drift) && report.drift.available === true ? report.drift : null;
+      const driftLines = isObject(drift) ? asArray(drift.lines) : [];
+
+      /* Cookie jar size - the cause behind most "Web authentication failed" dialogs. */
+      const cookies = isObject(report) && isObject(report.cookies) && report.cookies.available === true ? report.cookies : null;
+      const cookieReport = isObject(cookies) && isObject(cookies.report) ? cookies.report : null;
+
       const body = [];
       if (loadError !== '') {
         body.push(h('div', { key: 'load-error', className: 'drg-boot', 'data-state': 'bad' },
@@ -912,6 +994,33 @@ window.__ModuleLoader__.load({
           profileDir === ''
             ? null
             : h('p', { className: 'drg-boot-meta drg-mono' }, t('bootProfile', { dir: profileDir })),
+        ));
+
+        /* 1b. cookie jar - the "authentication failed" dialog is usually this */
+        body.push(h('div', { key: 'cookies', className: 'drg-section' },
+          h('h5', { className: 'drg-section-title' }, t('cookiesTitle')),
+          cookieReport === null
+            ? h('p', { className: 'drg-hint' }, cookies !== null && typeof cookies.source === 'string' && cookies.source === 'none'
+                ? t('cookiesNone')
+                : t('cookiesUnreadable'))
+            : h('div', null,
+                h('p', { className: cookieReport.level === 'broken' ? 'drg-flag drg-flag-bad' : cookieReport.level === 'warn' ? 'drg-flag drg-flag-warn' : 'drg-flag',
+                  }, t('cookiesVolume', {
+                    auth: asNumber(cookieReport.authCookies, 0),
+                    total: asNumber(cookieReport.headerBytes, 0),
+                    projected: asNumber(cookieReport.projected, 0),
+                    max: asNumber(cookies.maxHeaderBytes, 16384),
+                  })),
+                cookies.source === 'backup' && typeof cookies.backupAt === 'string'
+                  ? h('p', { className: 'drg-hint' }, t('cookiesFromBackup', { time: formatTime(cookies.backupAt) }))
+                  : null,
+                cookieReport.level === 'broken'
+                  ? h('p', { className: 'drg-hint' }, t('cookiesBroken'))
+                  : null,
+                h('p', { className: 'drg-cmd' },
+                  h('code', { className: 'drg-mono' }, 'dsh-rescue cookies --prune'),
+                  h('span', { className: 'drg-hint' }, t('cookiesPruneHint'))),
+              ),
         ));
 
         /* 2. crash history */
@@ -1305,6 +1414,140 @@ window.__ModuleLoader__.load({
       return h(Launcher, { t });
     }
 
+    /* -------------------------------------------------- settings section (设置面板) */
+
+    /**
+     * The `Agent 预设`/`记忆` 那一列的邻居：设置侧栏里一个独立的 rescue-guard 分区。
+     *
+     * 只放一件事——Cookie 自动清理策略。理由：这个策略的全部价值在于「下次 DSH 起不来时
+     * 已经生效」，而它必须在 Host 跑起来之前就可读；所以它存在
+     * `~/.dsh/rescue-guard/config.json`，与 CLI 共用一份，不是宿主 settings 命名空间。
+     *
+     * 注册方式照 `@balong/dsh-workbuddy-fix` 的做法（本机唯一验证过能在本宿主里出页面的写法）：
+     *   - 不给 slots.register 传 `locale`（未注册的 namespace 会被宿主校验拒绝 → 白屏）
+     *   - slots.inject 回调里 try/catch（同步抛错会让整个 client 半身加载失败）
+     */
+    function SettingsSection(props) {
+      const t = useTranslate(props);
+      const [config, setConfig] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [message, setMessage] = useState('');
+      const [cleaning, setCleaning] = useState(false);
+
+      const load = useCallback(async () => {
+        const result = await requestJson(CONFIG_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
+        if (!result.ok) { setMessage(t('settingsLoadFailed', { message: result.error })); return; }
+        setConfig(result.body?.config ?? null);
+        setMessage('');
+      }, [t]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const save = useCallback(async (patch) => {
+        setBusy(true);
+        try {
+          const result = await requestJson(CONFIG_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ config: patch }),
+          }, REQUEST_TIMEOUT_MS);
+          if (!result.ok || result.body?.ok !== true) {
+            setMessage(t('settingsSaveFailed', { message: result.body?.error ?? result.error ?? '' }));
+            return;
+          }
+          setConfig(result.body.config ?? null);
+          setMessage(t('settingsSaved'));
+        } finally {
+          setBusy(false);
+        }
+      }, [t]);
+
+      const cleanNow = useCallback(async () => {
+        setCleaning(true);
+        setMessage('');
+        try {
+          const keep = config?.cookies?.keepNewest ?? 0;
+          const result = await requestJson(COOKIE_CLEAN_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ keepNewest: keep }),
+          }, ACTION_TIMEOUT_MS);
+          const body = result.body ?? {};
+          if (body.ok === true) {
+            setMessage(t('settingsCleanDone', { removed: body.result?.removed ?? 0, after: body.result?.after ?? 0 }));
+            await load();
+          } else if (body.reason === 'locked') {
+            setMessage(t('settingsCleanLocked'));
+          } else {
+            setMessage(t('settingsCleanFailed', { message: body.error ?? result.error ?? '' }));
+          }
+        } finally {
+          setCleaning(false);
+        }
+      }, [config, load, t]);
+
+      if (config === null) {
+        return h('div', { className: 'drg-settings' },
+          h('p', { className: 'drg-hint' }, message || t('loading')),
+          h('button', { type: 'button', className: 'drg-btn', onClick: load }, t('refresh')),
+        );
+      }
+
+      const cookies = config.cookies ?? {};
+      const row = (label, description, control) => h('div', { className: 'drg-setting-row' },
+        h('div', { className: 'drg-setting-text' },
+          h('p', { className: 'drg-setting-label' }, label),
+          description === '' ? null : h('p', { className: 'drg-setting-desc' }, description),
+        ),
+        control,
+      );
+
+      return h('div', { className: 'drg-settings' },
+        h('h4', { className: 'drg-settings-title' }, t('settingsTitle')),
+        h('p', { className: 'drg-hint' }, t('settingsIntro')),
+
+        row(t('settingsAutoClean'), t('settingsAutoCleanDesc'),
+          h('label', { className: 'drg-switch' },
+            h('input', {
+              type: 'checkbox',
+              checked: cookies.autoClean === true,
+              disabled: busy,
+              onChange: (event) => save({ cookies: { autoClean: event.target.checked } }),
+            }),
+            h('span', null, cookies.autoClean === true ? t('on') : t('off')),
+          ),
+        ),
+
+        row(t('settingsKeepNewest'), t('settingsKeepNewestDesc'),
+          h('input', {
+            type: 'number',
+            className: 'drg-input',
+            min: 0,
+            max: 1000,
+            value: String(cookies.keepNewest ?? 0),
+            disabled: busy,
+            onChange: (event) => {
+              const next = Number(event.target.value);
+              if (!Number.isFinite(next) || next < 0) return;
+              save({ cookies: { keepNewest: Math.floor(next) } });
+            },
+          }),
+        ),
+
+        row(t('settingsPruneNow'), t('settingsPruneNowDesc'),
+          h('button', {
+            type: 'button',
+            className: 'drg-btn drg-btn-primary',
+            disabled: busy || cleaning,
+            onClick: cleanNow,
+          }, cleaning ? t('refreshing') : t('settingsPruneButton')),
+        ),
+
+        message === '' ? null : h('p', { className: 'drg-hint drg-settings-msg' }, message),
+        h('p', { className: 'drg-hint drg-mono' }, t('settingsPath')),
+      );
+    }
+
     /* ------------------------------------------------------------------- apply */
 
     return {
@@ -1330,6 +1573,28 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ command: commandLine ?? COMMAND_FALLBACK }),
         }, PanelSeat));
+
+        /* 设置侧栏里的独立分区（"设置" 列表里 Our Free Model / wb400修复 那一列的邻居）。
+         *
+         * ⚠️ 两个必须避开的坑（都会让宿主白屏 "Failed to load plugins"）：
+         *   ① 不给 slots.register 传 `locale` —— 未在宿主 LocaleNamespaceMap 注册的
+         *      namespace 会被校验拒绝，而 slots.inject 的回调错误是同步抛出的；
+         *   ② 回调里 try/catch —— 同上。
+         * 文案走本模块自带字典（boundT 先问宿主 locale，取不到用内嵌），不依赖宿主注册。 */
+        ctx.slots.inject('settings.section', () => {
+          try {
+            return ctx.slots.register({
+              name: 'settings.section',
+              // 独立 id：新条目「加在」现有条目旁边；复用已发布的 id 会替换掉那个页面。
+              id: 'rescue-guard-settings',
+              order: 46,
+              label: () => boundT('settingsNav'),
+            }, (props) => h(SettingsSection, { ...props, t: useTranslate(props) }));
+          } catch (error) {
+            console.error('[rescue-guard] settings section registration failed:', error);
+            return () => {};
+          }
+        });
       },
     };
   },
