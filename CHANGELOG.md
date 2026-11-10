@@ -5,6 +5,82 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-10
+
+Cookie 自动清理策略现在**可配置、可调试、两处入口共用一份真源**。
+
+### 新增
+
+- **设置面板里的「启动救援」分区**（`settings.section`，order 46）：设置 → 启动救援，
+  与「Our Free Model」「wb400修复」「记忆」同级。放三件东西：
+  1. 自动清理开关；
+  2. 保留最新令牌数（0 = 全删）；
+  3. 「立即清理」按钮（被占用时给出明确原因）。
+- **`~/.dsh/rescue-guard/config.json`**（`lib/config.js`）：策略的唯一真源。
+  选文件而不是宿主 settings 命名空间，是因为这个策略的价值在于「DSH 起不来时已经生效」——
+  那时宿主 settings 读不到，而 CLI 必须读到。深合并写入、原子落盘、损坏自动回落默认。
+- **CLI 侧同源控制**（控制台可调试）：
+  ```
+  dsh-rescue cookies --policy      查看策略
+  dsh-rescue cookies --auto on|off 开关自动清理
+  dsh-rescue cookies --keep-set N  持久化保留数
+  dsh-rescue cookies --auto-run    按策略执行一次（计划任务/启动前钩子用）
+  ```
+- **救援台菜单**新增 `[9] 自动清理策略`、`[a] 打开自动清理`、`[b] 关闭自动清理`、
+  `[d] 生成桌面入口`（`[9]` 让位给策略）。
+- **`/dsh-rescue/config.json`**（GET 读 / POST 写）与 **`/dsh-rescue/cookies/clean.json`**
+  两个路由，供面板调用。
+
+### 修复
+
+- **空的分区库会盖住真正的库**（`lib/cookies.js`）：`worst` 原先只按 level 排序，
+  而每台机器都可能存在一个空的 `Partitions/<hash>/Network/Cookies`，它测出来 0 字节、
+  level `ok`，于是 `--auto-run` 打印「0% 无需清理」——在真正 98% 的库旁边。
+  改为「有 dsh-auth 令牌优先 → 有 cookie 优先 → 再比 level」，并修掉 reduce 以 null 起始
+  导致永远返回 null 的连带缺陷。
+- **`cookies` 不再要求 profile 存在**：cookie 库在 Electron 的 userData 里，与 profile 无关；
+  profile 正在被重建恰恰是救援工具最该能跑的时刻。
+
+### 测试
+
+50 项（44 → +6）：策略默认值 / 写入重读 / 深合并不丢字段 / 损坏回落 / 非法值规范化 /
+空分区库不得盖过真库。`harness-smoke` 纳入两个新路由（路由数改为动态计数）。
+
+## [0.4.0] - 2026-11-10
+
+针对 2026-11-10 的真实事故。这次崩溃的弹窗说「Web authentication failed」，看起来像账号
+问题，实际是 **cookie 堆积把 HTTP 请求头撑过了 16 KiB**。
+
+### 新增
+
+- **`dsh-rescue cookies` 子命令**（`lib/cookies.js`）：测量 Chromium cookie 库里
+  `dsh-auth-*` 令牌的数量与 Cookie 头字节数，判定是否逼近/超过 Node 默认
+  `maxHeaderSize`（16 KiB），并可按 `--keep N` / `--dry-run` / `--force` 清理。
+  实测数据：故障时 71 条令牌、Cookie 头 16117 字节、加其它头 16717 字节 → 431。
+  - 读实时库会 `EBUSY`（Chromium 独占），因此新增 `--from-backup` 读上次备份估算。
+  - 删除前必定备份到 `~/.dsh/backups/dsh-cookies-<时间戳>.db`。
+  - 用 `node:sqlite`（Node ≥ 22.5 内置），无第三方依赖；缺该模块时给出可执行的提示。
+- **桌面救援台**（`bin/rescue-console.cmd` + `bin/install-desktop.mjs`）：
+  `dsh-rescue-desktop` 在桌面生成一个双击即开的编号菜单，覆盖诊断 / Cookie / 崩溃历史 /
+  预检 / 安全模式 / 快照 / 禁用插件。自己探测 Node（优先 DSH 自带运行时），**不依赖 PATH、
+  不依赖 DSH 能启动、不改注册表、不加开机自启**，删掉文件即完全还原。
+- **启动期 cookie 体检**：`apply` 里起一个延迟定时器（不阻塞启动），能读到库时对
+  `broken`/`warn` 记一条警告，附上具体清理命令。
+- `web_auth` 分类由「不可预检」改为**可预检**，`action` 与 `advise()` 都改为
+  **先量 Cookie、再谈根路由**——这次的教训正是旧建议直接指向 safe-mode 二分。
+- `package.json` 增加 `bin`（`dsh-rescue`、`dsh-rescue-desktop`）与 `scripts.desktop-shortcut`。
+
+### 关键认知
+
+Cookie 头 16117 + 其它请求头约 600 = 约 16700 字节。**只看 Cookie 头会低估**，因为这
+600 字节正是决定越过 16384 的那部分。判定因此按「Cookie + `OTHER_HEADER_RESERVE`」计算，
+而报告的百分比仍如实基于实际测量值。
+
+### 测试
+
+33 项（24 → +9）。新增的 9 项覆盖：令牌计数、Cookie 头估算精度、整请求头判定、
+dry-run 不改动、`--keep N` 精确保留、备份存在、清理后降为 `ok`、SQLite 完整性、默认全删。
+
 ## [0.3.1] - 2026-11-09
 
 对 0.3.0 的代码审查结论落地。0.3.0 的三项 bug 修复经逐行核对属实并保留；本版修掉审查中
