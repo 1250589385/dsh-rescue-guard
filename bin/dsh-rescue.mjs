@@ -16,6 +16,7 @@
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -24,6 +25,8 @@ import { HEURISTIC_NOTE, scanProfile } from '../lib/scan.js'
 import { createSnapshot, listSnapshots, restoreSnapshot } from '../lib/snapshot.js'
 import { applyIfArmed, arm, confirmHealthyBoot, disarm, status } from '../lib/safemode.js'
 import { readBoot } from '../lib/paths.js'
+import { chromiumTimeToIso, inspectCookies, newestCookieBackup, pruneAuthCookies, MAX_HEADER_BYTES } from '../lib/cookies.js'
+import { readConfig, writeConfig, configPath } from '../lib/config.js'
 
 const C = {
   reset: '\u001b[0m', bold: '\u001b[1m', dim: '\u001b[2m',
@@ -44,6 +47,13 @@ dsh-rescue —— DSH 启动救援工具（不依赖 DSH 本身，起不来时�
 用法:
   dsh-rescue diagnose                 看崩溃原因 + 预检 + 给建议（推荐先跑这个）
   dsh-rescue crashes [--limit N]      只列归类后的崩溃历史
+  dsh-rescue cookies [--json]         测量 Cookie 头体积，超限时清理陈旧 dsh-auth-* 令牌
+  dsh-rescue cookies --prune [--keep N] [--dry-run]  清理（默认全删陈旧令牌，--keep 保留最新 N 条）
+  dsh-rescue cookies --install-task    生成一个每天自动清理的计划任务命令（不自动执行）
+  dsh-rescue cookies --auto-run        按策略执行一次（给计划任务/启动前钩子用）
+  dsh-rescue cookies --policy          查看当前自动清理策略（与设置面板同一份文件）
+  dsh-rescue cookies --auto on|off     打开/关闭自动清理
+  dsh-rescue cookies --keep-set N      持久化「保留最新 N 条」
   dsh-rescue scan                     只跑启动前静态预检
   dsh-rescue safe-mode status         看安全模式是否布防
   dsh-rescue safe-mode on [--reason T] 布防：下次启动只加载官方 bundle
@@ -53,6 +63,8 @@ dsh-rescue —— DSH 启动救援工具（不依赖 DSH 本身，起不来时�
   dsh-rescue snapshot restore <id>    回滚到某份快照
   dsh-rescue disable <bundle>         把某个 bundle 从启动列表移除
   dsh-rescue enable <bundle>          加回启动列表
+  dsh-rescue menu                     交互式救援菜单（桌面入口调用的就是它）
+  dsh-rescue install-desktop          在桌面创建双击即开的入口
   dsh-rescue help                     显示本帮助
 
 选项:
@@ -137,7 +149,18 @@ function advise({ crashes, scan, safe, manifestError }) {
     const one = scan.missingFiles[0]
     tips.push({ level: 'bad', text: `有插件在构造时读取不存在的文件（首个：${one.plugin} → ${one.path}）。这类 ENOENT 会让宿主启动即死。用 dsh-rescue disable ${one.plugin} 或重装该插件` })
   }  if (by.web_auth) {
-    tips.push({ level: 'warn', text: `出现 ${by.web_auth} 次「Web authentication failed」。这是桌面端启动握手被拒，常见于某个插件占了根路由或端口被占。先 dsh-rescue safe-mode on 再启动，能起来了再逐个 dsh-rescue enable 定位` })
+    // 2026-11-10: this exact message was NOT a routing problem. 71 accumulated dsh-auth-* cookies
+    // pushed the request header past 16 KiB, the Host answered 431, and `connectDesktopWelcome`
+    // reported it as "authentication failed". Measuring cookies first is both cheaper and far
+    // more likely to be the cause than bisecting plugins.
+    tips.push({
+      level: 'warn',
+      text:
+        `出现 ${by.web_auth} 次「Web authentication failed」。先量 Cookie 体积（最常见原因是 ` +
+        'dsh-auth-* 令牌堆积把请求头撑过 16KB，Host 回 431，界面只说"认证失败"）：' +
+        'dsh-rescue cookies --from-backup。确认为超限就退出 DSH 后 dsh-rescue cookies --prune。' +
+        'Cookie 远小于上限时，才考虑 safe-mode 排查根路由遮蔽',
+    })
   }
   if (by.entry_inactive) {
     // When the stack names a third-party package, bisecting with safe mode is wasted work: the
@@ -299,6 +322,266 @@ function printScan(scan) {
   }
 }
 
+/**
+ * `cookies` — measure the Cookie header, and prune the accumulated launch tokens.
+ *
+ * Reading is always safe; writing is not, because Chromium holds the jar open. The command
+ * therefore reports whether DSH looks alive before it deletes anything, and refuses to write
+ * when `--prune` is asked for while the app is running unless `--force` is given.
+ *
+ * @param opts - `{ flags, rest, json }`.
+ * @returns Process exit code.
+ */
+async function runCookies({ flags, rest, json }) {
+  const fromBackup = rest.includes('--from-backup') || flags.cookiesFromBackup === true
+  const prune = rest.includes('--prune') || flags.cookiesPrune === true
+  const dryRun = rest.includes('--dry-run') || flags.cookiesDryRun === true
+  const force = rest.includes('--force') || flags.cookiesForce === true
+  const keepIndex = rest.indexOf('--keep')
+  const keepRaw = keepIndex >= 0 ? Number(rest[keepIndex + 1]) : Number(flags.cookiesKeep)
+  const keep = Number.isFinite(keepRaw) && keepRaw > 0 ? keepRaw : 0
+
+  if (rest.includes('--install-task') || flags.cookiesInstallTask) {
+    printCookieTaskCommand()
+    return 0
+  }
+
+  // Policy inspection and editing. Deliberately part of `cookies` rather than a new top-level
+  // command: the file it edits exists only to decide what `cookies` does, and keeping them
+  // together means the setting is discoverable exactly where it is used.
+  // The unattended entry point: a scheduled task or a pre-launch hook runs this, and it decides
+  // from the stored policy whether to act. Exit code 0 always (a cleaning failure must not stop
+  // an unrelated launcher), the reason goes to stdout.
+  if (rest.includes('--auto-run') || flags.cookiesAutoRun) {
+    const config = readConfig()
+    if (config.cookies.autoClean !== true) {
+      info('自动清理未开启，跳过。开启：dsh-rescue cookies --auto')
+      return 0
+    }
+    let report
+    try {
+      report = await inspectCookies({ userDataDir: flags.userData || undefined })
+    } catch (error) {
+      warn(`读取 cookie 数据库失败：${error?.message ?? error}`)
+      return 0
+    }
+    const worst = report?.worst
+    if (!worst || worst.error) {
+      warn('读不到 cookie 数据库（可能被占用），本次跳过。')
+      return 0
+    }
+    if (worst.level === 'ok') {
+      ok(`Cookie 头约 ${worst.projected} 字节（${Math.round(worst.ratio * 100)}%），无需清理。`)
+      return 0
+    }
+    if (isDshRunning()) {
+      warn('DSH 正在运行，Chromium 独占 cookie 库，本次跳过（下次干净启动时再清理）。')
+      return 0
+    }
+    try {
+      const result = await pruneAuthCookies({ file: worst.file, keepNewest: config.cookies.keepNewest })
+      ok(`已清理 dsh-auth：${result.before} → ${result.after} 条（删除 ${result.removed}）`)
+      info(paint(C.dim, `备份：${result.backup}`))
+    } catch (error) {
+      warn(`清理失败：${error?.message ?? error}`)
+    }
+    return 0
+  }
+
+  if (rest.includes('--policy') || rest.includes('--auto') || rest.includes('--keep-set')) {
+    const autoIndex = rest.indexOf('--auto')
+    const keepSetIndex = rest.indexOf('--keep-set')
+    let config = readConfig()
+
+    if (autoIndex >= 0) {
+      const value = String(rest[autoIndex + 1] ?? '').toLowerCase()
+      if (value !== 'on' && value !== 'off') {
+        console.error('--auto 需要 on 或 off')
+        return 2
+      }
+      config = writeConfig({ cookies: { autoClean: value === 'on' } })
+      ok(`自动清理：${config.cookies.autoClean ? '已开启' : '已关闭'}`)
+    }
+    if (keepSetIndex >= 0) {
+      const value = Number(rest[keepSetIndex + 1])
+      if (!Number.isFinite(value) || value < 0) {
+        console.error('--keep-set 需要一个 ≥ 0 的整数')
+        return 2
+      }
+      config = writeConfig({ cookies: { keepNewest: Math.floor(value) } })
+      ok(`保留最新令牌数：${config.cookies.keepNewest}`)
+    }
+
+    head('Cookie 自动清理策略')
+    info(`  自动清理        ${config.cookies.autoClean ? paint(C.green, '开启') : '关闭'}`)
+    info(`  保留最新令牌    ${config.cookies.keepNewest} 条${config.cookies.keepNewest === 0 ? '（= 全删）' : ''}`)
+    info(`  预警阈值        ${Math.round(config.cookies.warnRatio * 100)}% 上限`)
+    info(`  清理前确认      ${config.cookies.confirmBeforeClean ? '是' : '否'}`)
+    info(paint(C.dim, `  设置文件        ${configPath()}`))
+    info(paint(C.dim, '  与「设置 → 启动救援」面板共用同一份文件。'))
+    return 0
+  }
+
+  let report
+  try {
+    if (fromBackup) {
+      const backup = newestCookieBackup()
+      if (!backup) {
+        console.error('没有找到 dsh-cookies-*.db 备份。先退出 DSH 跑一次 dsh-rescue cookies。')
+        return 2
+      }
+      const { inspectCookieDatabase } = await import('../lib/cookies.js')
+      const db = await inspectCookieDatabase(backup.file, path.join(os.tmpdir(), 'dsh-rescue-cookies'))
+      report = { databases: [db], worst: db, level: db.level, fromBackup: backup.file, backupAt: backup.at }
+    } else {
+      report = await inspectCookies({ userDataDir: flags.userData || undefined })
+    }
+  } catch (error) {
+    console.error(paint(C.red, '无法读取 cookie 数据库：') + (error?.message ?? error))
+    console.error(paint(C.dim, '（DSH 自带 Node 24 含 node:sqlite；本机 node 太旧时请用 bin\\dsh-rescue.cmd）'))
+    return 2
+  }
+
+  if (json && !prune) {
+    console.log(JSON.stringify({ ...report, maxHeaderBytes: MAX_HEADER_BYTES }, null, 2))
+    return report.level === 'broken' ? 1 : 0
+  }
+
+  head('Cookie 体积（决定能否启动握手）')
+  if (!report.databases.length) {
+    info(paint(C.dim, '没有找到 cookie 数据库（这台机器可能从未跑过 Desktop 端）'))
+    return 0
+  }
+  info(paint(C.dim, `上限：Node 默认 maxHeaderSize = ${MAX_HEADER_BYTES} 字节（Cookie 头还要加上其它请求头）`))
+  for (const db of report.databases) {
+    if (db.error) {
+      // A running DSH locks its jar; that is a state to explain, not a failure to dump.
+      if (/正被 DSH 占用|locked|EBUSY/i.test(db.error)) {
+        warn(`${db.file}`)
+        info(paint(C.dim, '    正被运行中的 DSH 占用，无法读取。先完全退出 DSH（含托盘图标）再重跑。'))
+        info(paint(C.dim, '    只看历史占用情况可读上次备份：dsh-rescue cookies --from-backup'))
+      } else {
+        bad(`${db.file} 读取失败：${db.error}`)
+      }
+      continue
+    }
+    const pct = Math.round(db.ratio * 100)
+    const line = `${db.total} 条 cookie（dsh-auth-* ${db.authCookies} 条） → Cookie 头约 ${db.headerBytes} 字节（${pct}%），加其它头约 ${db.projected} 字节`
+    if (db.level === 'broken') bad(line)
+    else if (db.level === 'warn') warn(line)
+    else ok(line)
+    if (db.authCookies > 0 && db.oldest !== null) {
+      info(
+        paint(
+          C.dim,
+          `    dsh-auth 令牌龄期：${chromiumTimeToIso(db.oldest)?.slice(0, 19) ?? '?'} → ${chromiumTimeToIso(db.newest)?.slice(0, 19) ?? '?'}`
+        )
+      )
+    }
+    info(paint(C.dim, `    ${db.file}`))
+  }
+
+  if (report.level === 'broken') {
+    console.log()
+    bad('Cookie 头加上其它请求头已超过 16KB：Host 返回 431，桌面端只会显示「Web authentication failed」。')
+    info('    → 这就是「认证失败」却查不出账号问题的原因：坏的是请求头体积，不是凭据。')
+  } else if (report.level === 'warn') {
+    console.log()
+    warn('已超过 60% 上限：按当前速度还会再涨，建议现在就清一次。')
+  }
+
+  if (!prune) {
+    console.log()
+    info(paint(C.dim, '要清理陈旧令牌：') + 'dsh-rescue cookies --prune')
+    info(paint(C.dim, '先看会删多少：') + 'dsh-rescue cookies --prune --dry-run')
+    info(paint(C.dim, '只保留最新 3 条：') + 'dsh-rescue cookies --prune --keep 3')
+    return report.level === 'broken' ? 1 : 0
+  }
+
+  console.log()
+  const target = report.worst
+  if (!target?.file) {
+    bad('没有可清理的数据库')
+    return 2
+  }
+  if (!force && isDshRunning()) {
+    bad('检测到 DSH 正在运行：Chromium 独占这个文件，就地清理会失败或被覆盖。')
+    info('    先完全退出 DSH 再运行本条命令；确实要试可以加 --force（可能无效）。')
+    return 2
+  }
+
+  try {
+    const result = await pruneAuthCookies({ file: target.file, keepNewest: keep, dryRun })
+    if (result.dryRun) {
+      ok(`将删除 ${result.before - keep > 0 ? result.before - keep : 0} 条 dsh-auth-*（当前 ${result.before} 条，保留最新 ${keep} 条）—— dry-run，未改动`)
+      return 0
+    }
+    ok(`已清理：dsh-auth-* ${result.before} → ${result.after} 条，删除 ${result.removed} 条`)
+    info(paint(C.dim, `备份：${result.backup}`))
+    const after = await inspectCookieDatabaseQuiet(target.file)
+    if (after) info(`清理后 Cookie 头约 ${after.headerBytes} 字节（${Math.round(after.ratio * 100)}%）`)
+    console.log()
+    info('现在可以正常启动 DSH 了。')
+    return 0
+  } catch (error) {
+    bad(`清理失败：${error?.message ?? error}`)
+    if (/EBUSY|locked|eperm/i.test(String(error?.message ?? error))) {
+      info('    → 文件被占用：先完全退出 DSH（含托盘图标），再重跑。')
+    }
+    return 2
+  }
+}
+
+/** Re-measure without letting a failure mask the successful prune above. */
+async function inspectCookieDatabaseQuiet(file) {
+  try {
+    return (await inspectCookiesClear(file))
+  } catch {
+    return null
+  }
+}
+
+/** One database, no aggregation. */
+async function inspectCookiesClear(file) {
+  const { inspectCookieDatabase } = await import('../lib/cookies.js')
+  return inspectCookieDatabase(file, path.join(os.tmpdir(), 'dsh-rescue-cookies'))
+}
+
+/**
+ * Whether a DSH process is running.
+ *
+ * Checking the process list is platform-specific and may be denied; a false negative only means
+ * the caller gets the confusing EBUSY message that is already handled, so this stays best-effort.
+ */
+function isDshRunning() {
+  try {
+    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq DeepSeek Harness.exe', '/NH'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    })
+    return /DeepSeek Harness\.exe/i.test(out)
+  } catch {
+    return false
+  }
+}
+
+/** Print (never run) the command that would schedule a daily prune. */
+function printCookieTaskCommand() {
+  const cliPath = process.argv[1] ?? path.join('~', '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-rescue-guard', 'bin', 'dsh-rescue.mjs')
+  const cmdFile = path.join(path.dirname(cliPath), 'dsh-rescue.cmd')
+  head('每天自动清理 dsh-auth 令牌（需要你自己执行）')
+  info(paint(C.dim, '本命令只打印、不注册任何计划任务。确认无误后，在管理员 PowerShell 里执行：'))
+  console.log()
+  console.log(`  schtasks /Create /TN "DSH Rescue Cookie Prune" /SC DAILY /ST 04:00 /RL LIMITED ^`)
+  console.log(`    /TR "\"${cmdFile}\" cookies --prune --force" /F`)
+  console.log()
+  info(paint(C.dim, '说明：'))
+  info('  · 04:00 执行，避开使用时段；DSH 若在运行，需要先退出才会生效（--force 只为跳过检测）。')
+  info('  · 觉得碍事就删掉：' + 'schtasks /Delete /TN "DSH Rescue Cookie Prune" /F')
+  info(paint(C.dim, '  · 更轻的做法：每次遇到「Web authentication failed」手动跑一次 dsh-rescue cookies --prune。'))
+}
+
 function printAdvice(tips) {
   head('建议')
   for (const tip of tips) {
@@ -326,7 +609,12 @@ async function main() {
 
   const { home, profile, crashDirs } = defaults(flags)
 
-  if (!existsSync(profile)) {
+  // `cookies` / `menu` / `help` do not need a profile: the cookie jar lives in Electron's
+  // userData, and a profile that is missing (or being rebuilt) is exactly when a rescue tool
+  // must still run. Everything else does need it, so the check moved below the dispatch table's
+  // profile-free commands.
+  const PROFILE_FREE = new Set(['cookies', 'menu', 'help', 'install-desktop'])
+  if (!PROFILE_FREE.has(command) && !existsSync(profile)) {
     console.error(`找不到 profile 目录：${profile}`)
     console.error('用 --profile <dir> 指定，或检查 DSH_HOME。')
     return 2
@@ -340,6 +628,30 @@ async function main() {
       if (flags.json) { console.log(JSON.stringify({ crashes, summary: summarize(crashes) }, null, 2)); return 0 }
       printCrashes(crashes)
       return 0
+    }
+
+    case 'menu': {
+      // Delegated so the menu reuses this same argv parser: one code path, two front doors.
+      const { menuMain } = await import('../lib/menu.js')
+      const self = process.argv[1]
+      return await menuMain({
+        run: async (argv) => {
+          const { spawnSync } = await import('node:child_process')
+          const result = spawnSync(process.execPath, [self, ...argv], { stdio: 'inherit', windowsHide: false })
+          return result.status ?? 1
+        },
+      })
+    }
+
+    case 'install-desktop': {
+      const { spawnSync } = await import('node:child_process')
+      const script = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'install-desktop.mjs')
+      const result = spawnSync(process.execPath, [script, ...rest], { stdio: 'inherit' })
+      return result.status ?? 1
+    }
+
+    case 'cookies': {
+      return await runCookies({ flags, rest, json: Boolean(flags.json) })
     }
 
     case 'scan': {
