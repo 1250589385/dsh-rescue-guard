@@ -6,15 +6,12 @@
  * affordance left is "double-click something on the desktop". A .cmd in the plugin's
  * `node_modules` path is unusable in that moment — the user has to know where npm put it.
  *
- * This writes two files and nothing else:
- *   - the desktop shortcut/launcher, which calls `bin\rescue-console.cmd` with an absolute path;
- *   - nothing in the registry, no scheduled task, no autostart entry.
+ * This writes ONE file and nothing else: `<Desktop>\DSH救援台.cmd`. No registry, no scheduled
+ * task, no autostart. Content comes from `desktopEntryLines()` — the single source shared with
+ * the settings button and the install popup — so node never runs a .cmd
+ * (ERR_UNKNOWN_FILE_EXTENSION, 2026-11-11).
  *
- * Windows: creates `<Desktop>\DSH 救援台.cmd` (a real file, not a .lnk — a .lnk needs COM and
- * frequently fails under a constrained shell).
- * macOS/Linux: creates an executable shell script on the Desktop.
- *
- * Unix: `node bin/install-desktop.mjs [--remove]`
+ * `node bin/install-desktop.mjs [--remove]`
  */
 
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -23,14 +20,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const consoleCmd = path.join(here, 'rescue-console.cmd')
 const cliFile = path.join(here, 'dsh-rescue.mjs')
+const ENTRY_NAME = 'DSH救援台.cmd'
 
 /** Desktop directory: OneDrive redirects it, so a fixed `~` path is wrong on many machines. */
 function desktopDir(env = process.env) {
   if (process.platform === 'win32') {
-    // The shell's real desktop path is the USERPROFILE one even when OneDrive is enabled and the
-    // folder was merged; both are checked and the existing one wins.
     const home = env.USERPROFILE || os.homedir()
     const candidates = [path.join(home, 'Desktop'), path.join(home, 'OneDrive', 'Desktop'), path.join(home, '桌面')]
     for (const dir of candidates) if (existsSync(dir)) return dir
@@ -41,7 +36,7 @@ function desktopDir(env = process.env) {
 }
 
 const remove = process.argv.includes('--remove')
-const target = path.join(desktopDir(), process.platform === 'win32' ? 'DSH 救援台.cmd' : 'dsh-rescue-console.sh')
+const target = path.join(desktopDir(), process.platform === 'win32' ? ENTRY_NAME : 'dsh-rescue-console.sh')
 
 if (remove) {
   rmSync(target, { force: true })
@@ -59,20 +54,7 @@ function writeLauncher(target, content, exec = false) {
   } catch (error) {
     if (error?.code === 'EPERM' || error?.code === 'EACCES') {
       console.error('无权写入桌面目录：' + target)
-      console.error('')
-      console.error('这通常意味着：')
-      console.error('  · 桌面被重定向到 OneDrive 且当前账户无写权限，或')
-      console.error('  · 杀毒/受控文件夹访问拦住了写入，或')
-      console.error('  · 当前 shell 处于受限沙箱（本插件运行在 DSH 内时常见）。')
-      console.error('')
-      console.error('两个替代做法，功能完全相同：')
-      console.error('  1) 直接双击运行（无需安装）：')
-      console.error('     ' + consoleCmd)
-      console.error('  2) 在**管理员以外**的普通资源管理器里手动建快捷方式：')
-      console.error('     右键桌面 → 新建 → 快捷方式 → 目标填上面这一行。')
-      console.error('')
-      console.error('若你是在 DSH 会话里让我执行（很可能如此），说明这是会话沙箱拦住了')
-      console.error('桌面目录——在普通 cmd 里跑同一条命令即可成功。')
+      console.error('在普通 cmd（非管理员、非 DSH 会话）里重跑本命令即可。')
       return false
     }
     throw error
@@ -80,23 +62,11 @@ function writeLauncher(target, content, exec = false) {
 }
 
 if (process.platform === 'win32') {
-  // The launcher must not depend on the current directory: a shortcut's working directory is
-  // whatever Explorer decides. `cd /d` to the plugin's bin makes `%~dp0` and any relative path
-  // inside the console stable.
-  const body = [
-    '@echo off',
-    'chcp 65001 >nul',
-    'rem 由 dsh-rescue-guard 生成 —— DSH 起不来时双击这里。删除它不影响插件本体。',
-    `cd /d "${path.dirname(consoleCmd)}"`,
-    `call "${consoleCmd}"`,
-    '',
-  ].join('\r\n')
-  if (writeLauncher(target, body)) {
-    console.log('已创建桌面入口：' + target)
-    console.log('双击即可打开救援台（菜单形式，不依赖 DSH 能启动）。')
-  } else {
-    process.exitCode = 3
-  }
+  const { desktopEntryLines } = await import('../lib/desktop-offer.js')
+  const body = desktopEntryLines(cliFile).join('\r\n')
+  const ok = writeLauncher(target, body)
+  if (ok) console.log('已创建：' + target + '（双击即开救援台）')
+  else process.exitCode = 3
 } else {
   const body = [
     '#!/bin/sh',
@@ -106,8 +76,4 @@ if (process.platform === 'win32') {
   ].join('\n')
   if (writeLauncher(target, body, true)) console.log('已创建桌面入口：' + target)
   else process.exitCode = 3
-}
-
-if (!existsSync(consoleCmd) && process.platform === 'win32') {
-  console.log('注意：同目录下没有 rescue-console.cmd，菜单会被跳过，只余 CLI 本体。')
 }
