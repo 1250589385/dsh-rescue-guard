@@ -161,17 +161,17 @@ export function apply(ctx) {
       /* snapshotting is best effort */
     }
 
-    // Route registration gets its own black box: when THIS is the step that fails, the outer
-    // catch would otherwise degrade everything (commands, prompt, restore) with one anonymous
-    // error, and the reason would be invisible in the live host.
-    try {
-      for (const dispose of registerRoutes(ctx, { profileDir: paths.profileDir, home: paths.home, cliHint, pluginDir: pluginRoot() })) {
+    // Route registration runs inside `ctx.inject(['webServer'], …)` — cordis' "run this once
+    // these services exist". Touching `ctx.webServer` without the declaration throws
+    // `cannot get property "webServer" without inject` (2026-11-11 black box), which degraded
+    // this plugin's whole half: on this machine the routes had never actually registered live,
+    // on any version, while the stub-host smoke kept passing because the stub hands webServer
+    // out for free.
+    ctx.inject(['webServer'], (scoped) => {
+      for (const dispose of registerRoutes(scoped, { profileDir: paths.profileDir, home: paths.home, cliHint, pluginDir: pluginRoot() })) {
         disposers.push(dispose)
       }
-    } catch (error) {
-      writeApplyError(paths.profileDir, error, 'registerRoutes')
-      throw error
-    }
+    })
 
     // First install on a Desktop host: offer the standalone rescue entry once. Detached, so the
     // Host process never waits on the dialog.
