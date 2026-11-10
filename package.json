@@ -1,6 +1,6 @@
 {
   "name": "dsh-rescue-guard",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DSH 启动救援与自我修复：启动前静态预检命令名冲突与缺失文件，保留配置快照，DSH 起不来时用独立 CLI（dsh-rescue）禁用可疑 bundle 并回滚清单。",
   "type": "module",
   "license": "MIT",
