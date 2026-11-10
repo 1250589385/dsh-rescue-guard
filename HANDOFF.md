@@ -1,89 +1,123 @@
-# 交接：dsh-rescue-guard 0.3.0
+# 交接：dsh-rescue-guard 0.5.0
 
-> 给另一台电脑上的 Agent。本目录是**完整可发布的源码树**（从安装副本复制后改出来的），
-> 不是 node_modules 里的运行副本。所有改动已通过语法门禁与 16 项回归测试。
+> 完整可发布的源码树。语法门禁 + **50 项**回归 + 5 套单测 + harness smoke + client-section 全绿。
+>
+> **先读这三份**：本文件（状态与坑）→ `UPDATE-GUIDE.md`（人照着做的更新步骤）→
+> `CHANGELOG.md` 的 0.5.0 / 0.4.0 段（每项改动对应的真实事故）。
+>
+> `dsh-rescue-guard/` 就是插件源码，`cd` 进去即可跑；无第三方依赖，需 Node ≥ 22.5。
+
+## 0. 你被交办了什么（先看这张表）
+
+| # | 任务 | 验收标准 | 失败时 |
+|---|---|---|---|
+| 1 | 跑全测试，确认这棵树是好的 | `node test/regression.mjs` → **50/50**；`node test/harness-smoke.mjs` → `routes: 7` | 说明文件在传输中损坏，重新解压 |
+| 2 | 补跑 CI 测试 | `node test/cli.test.mjs` → 9 项通过 | 我这边被沙箱禁了 piped spawn，**这一套只有你能验** |
+| 3 | 推 GitHub（**必须 clone 后覆盖，不能直接推**） | `git log` 仍有 `41756e9`；`git status` 无删除项 | 见第 4 节，空仓库 push 会毁掉历史与 tag |
+| 4 | 装到本机验证设置面板 | 设置左栏出现「启动救援」，三项控件可用 | 白屏 → 回退，报错发回；见第 5 节 |
+| 5 | npm 发布（可选） | `npm publish` 后 `npm view dsh-rescue-guard version` → 0.5.0 | 需先 `npm login`（与 GitHub 无关）|
+
+**不要做的事**：不要在没有 clone 的目录里 `git push -f`；不要把 `.git` 打进交付包；
+不要 "修好" `test/fixtures/plugin-with-private-hook/`（那是有意保留的坏样本）。
+
+---
 
 ## 1. 一分钟验证
 
 ```bash
 cd dsh-rescue-guard
-node test/regression.mjs        # 期望：全部通过：16 项
-node --check index.js && node --check client.js
+node test/regression.mjs            # 期望：全部通过：50 项
+node test/harness-smoke.mjs         # 期望：routes: 7, command: rescue ...
+node bin/dsh-rescue.mjs help
+echo 0 | node bin/dsh-rescue.mjs menu   # 中文菜单必须正常
 ```
 
-无任何依赖（`dependencies` 与 `peerDependencies` 均为空），只需 Node ≥ 20。
+### 测试矩阵（本机实测）
 
-## 2. 这一版改了什么（都是真实事故反推，不是推测）
+| 套件 | 结果 |
+|---|---|
+| `test/regression.mjs` | **50/50** |
+| `test/crash.test.mjs` | 18/18 |
+| `test/scan.test.mjs` | 13/13 |
+| `test/snapshot.test.mjs` | 8/8 |
+| `test/safemode.test.mjs` | 16/16 |
+| `test/watcher.test.mjs` | 9/9 |
+| `test/harness-smoke.mjs` | OK（7 条路由实测） |
+| `test/client-section.test.mjs` | OK（设置分区注册安全） |
+| `test/cli.test.mjs` | **跳过**（沙箱禁 piped spawn，请在普通终端补跑） |
 
-2026-11-09 07:04/07:05/07:06，本机连续三次启动失败：
+## 2. 0.5.0 改了什么
 
-```
-DesktopHostFatalError: dsh: startup failed: 4 required plugins did not activate
-Failed plugins (27): …
-  TypeError: Cannot read properties of null (reading 'entry')
-      at loaderCtx.on.global (…/node_modules/dsh-ops/lib/session-pwsh.js:19:25)
-```
+### 策略可配置、可调试（用户明确要求）
 
-根因：`dsh-ops@0.3.0` 订阅宿主私有事件 `internal/config`，回调里读 `this.entry`；宿主 cordis
-升到 4.1.0 后不再给 hook 绑定 `this` → 每个插件的配置解析都抛错 → 24 个 failed、52 个 pending。
+Cookie 自动清理策略存在 `~/.dsh/rescue-guard/config.json`，**不是**宿主 settings 命名空间。
+原因：策略唯一有价值的时刻是「宿主起不来、要决定下次怎么清理」，那时宿主 settings 读不到，
+只有独立文件能被 CLI 读到。
 
-**0.3.0 的四项改动 + 三个 bug 修复全部来自这次事故的实测证据**，见 `CHANGELOG.md` 的 0.3.0 段。
+三个入口共用同一份：
 
-### 新增
-| 能力 | 文件 | 关键函数 |
-|---|---|---|
-| 崩溃栈帧解析 → 指认肇事包 | `lib/crash.js` | `extractFrames` / `pickCulprit` |
-| 启动指纹 + 与 lastGood 自动 diff | `lib/fingerprint.js`（新） | `captureFingerprint` / `diffFingerprints` / `describeDiff` |
-| 预检第 4 条规则：`internal/*` 订阅 | `lib/scan.js` | `findPrivateHooks` |
-| 快照记录宿主版本 | `lib/snapshot.js` | `createSnapshot({ hostVersion })` |
-| 快照按时间轮换 | `lib/snapshot.js` | `shouldSnapshot` |
+| 入口 | 怎么用 |
+|---|---|
+| 设置面板 | 设置 → **启动救援**（与 Our Free Model / wb400修复 / 记忆 同级）|
+| CLI | `cookies --policy` / `--auto on\|off` / `--keep-set N` / `--auto-run` |
+| 救援台 | `[9]` 策略、`[a]` 开、`[b]` 关 |
 
-### 修复
-| bug | 位置 | 症状 |
-|---|---|---|
-| `previousCrashes` 键名不一致（写 `previousCrashes`、读 `crashes`） | `lib/paths.js` `beginBoot` | 连崩 N 次恒报 1 |
-| `confirmBoot` 只由 HTTP 路由触发 | `index.js` `apply` | `pending` 永远清不掉，每次正常启动后下一轮误报"上次启动未完成" |
-| 快照"一份都没有才存"（与注释意图相反） | `index.js` | 永远只保留安装当天的清单 |
+配置字段：`autoClean`（默认 false）、`keepNewest`（默认 0）、`warnRatio`（0.6）、
+`confirmBeforeClean`（true）。深合并写入、原子落盘、损坏自动回落。
 
-## 3. 你必须知道的仓库状态（我查过，别重复踩）
+### 0.5.0 修的真 bug
+
+**空的分区库盖住了真正的库**：本机有 `Partitions/<hash>/Network/Cookies`（0 条、0 字节），
+`worst` 原先只按 level 排序 → `--auto-run` 报「600 字节 0%，无需清理」，
+而真库是 16117 字节。已改为**有令牌优先 → 有 cookie 优先 → 再比 level**；
+连带修掉 reduce 以 null 起始导致永远返回 null 的缺陷。
+
+### 0.4.0 的能力（本轮前半段）
+
+- `cookies` 子命令：测量 + 清理（`--prune/--keep/--dry-run/--from-backup`）
+- 桌面救援台（纯 ASCII `.cmd` + Node 菜单）
+- 启动期 cookie 体检（延迟、不阻塞、读不到回退读备份）
+- `web_auth` 改为可预检
+
+### 顺带修掉 0.3.1 的真 bug
+
+`client.js` 里 `driftLines` 被使用 5 次却**从未声明**（`drift`/`report.drift` 全无），
+面板一打开就 `ReferenceError`。已补回 `drift`/`driftLines`/`cookies`/`cookieReport`。
+
+## 3. 四个踩过的坑（别重复）
+
+1. **`.cmd` 不能写中文**：`cmd.exe` 按控制台代码页解析批处理，`chcp 65001` 对已读入行无效。
+   现在 `rescue-console.cmd` 是纯 ASCII（测试有断言：非 ASCII 字节必须为 0）。
+2. **会话沙箱写不了桌面**：`install-desktop.mjs` 在 DSH 会话里 `EPERM`，已改为友好提示。
+   在普通 cmd 里跑即可，或直接双击 `bin\rescue-console.cmd`。
+3. **client.js 是 CRLF**：改它时锚点必须带 `\r\n`，否则静默不匹配。
+4. **`settings.section` 不能传 `locale`**：未注册的 namespace 会被宿主校验拒绝，
+   而 `slots.inject` 回调是同步抛错 → 整个 client 半身加载失败 → 白屏。
+   `test/client-section.test.mjs` 锁住了这一条。
+
+## 4. 发布
 
 | 项 | 状态 |
 |---|---|
-| npm 上的包 | `dsh-rescue-guard` 已存在，latest = **0.2.1**，maintainer = `raysnows` (r1250589385@163.com) |
-| 本机 npm 登录 | ❌ **未登录**（`npm whoami` → `ENEEDAUTH`）。需要 `npm login` |
-| 上游源码仓库 | 本机**没有** git 仓库，这份目录已补齐 `repository`/`homepage`/`bugs` 字段指向 `github.com/1250589385/dsh-rescue-guard`。**若实际仓库地址不同，先改 package.json。** |
-| 版本号 | 已改 0.2.1 → **0.3.0** |
+| 仓库 | `github.com/1250589385/dsh-rescue-guard`（远端 latest **0.3.1**，本地 prepared 0.5.0）|
+| npm | latest **0.2.1**，未登录（`ENEEDAUTH`）|
+| push 权限 | ❌ 本机无 git 凭据（无 `.gitconfig`、无 `.git-credentials`、无 SSH 私钥、凭据管理器无 GitHub 项），且 `git clone` 报 `Connection was reset` |
 
-## 4. 发布前检查清单
+**推送需要你在有自己的凭据的机器上做**：
 
-1. `node test/regression.mjs` 全绿（16 项）
-2. `npm login`（GitHub 登录与 npm 是两套凭据）
-3. 确认 `package.json` 的 `repository` 地址与真实仓库一致
-4. `npm pack --dry-run` 核对文件清单——**新增文件必须在 `files` 里**，否则安装后 ENOENT
-   （`files` 已含 `lib`/`bin`/`locale`/`test`，`lib/fingerprint.js` 随 `lib` 通配）
-5. `npm publish`（0.3.0，无 scope，公开）
-6. 发版后：删掉本地 `.rescue/snapshots` 里旧快照可验证新 meta 有 `hostVersion` 字段
+```bash
+git clone https://github.com/1250589385/dsh-rescue-guard.git dsh-rescue-guard-src
+# 把本目录的文件覆盖进去（保留 .git）
+git add -A && git commit -m "feat: cookie auto-clean policy, rescue console, drift fix (0.5.0)"
+git push origin main
+```
 
-## 5. 未做 / 明确不做的
+发布前：`npm login` → `npm pack --dry-run` 核对 → `npm publish`。
 
-- **没有实现"更新前拦截"**：宿主 `app.asar/lib/main.js` 的 `install()` 里唯一钩子
-  `beforeRestart` 是主进程闭包参数，插件够不到；preload 只暴露 `updates.status()` /
-  `updates.open()` / `updates.subscribe()`，**没有 check/download/install 权限**。
-  `subscribe()` 能收到 `phase: "ready"`（已下载、等用户点安装），理论上可在那时提醒，
-  但不能阻止——这是 v0.4 的可选项，本版未做。
-- **未恢复** `ptc-plus` / `llm-fallbacks` / `dsh-ops-background` 三条 patch（前两个需要
-  `pnpm add` 装包，第三个已被 dsh-ops 0.5.2 明确废弃）。与插件本身无关，是宿主 profile 的事。
+## 5. 未验证
 
-## 6. 面板 UI 有一处新增需要肉眼确认
-
-`client.js` 的启动状态区块新增了 `drift` 渲染（"相对上次成功启动的变化"）。已通过
-`node --check`，但**未在真实浏览器里渲染验证**（我这边没有可操作宿主面板的条件）。
-接手方首次安装后，若面板报错，优先检查：
-- `client.js` 是 **CRLF** 行尾，改它时锚点必须带 `\r\n`
-- 内联字典有两份（en @~4501、zh @~8974），两处都要加 key
-- `locale/zh.json`、`locale/en.json` 是给 Host 用的另一份，与内联字典独立，两处都要有
-
----
-
-**来源说明**：本目录由 2026-11-09 对 `C:\Users\dell\.dsh\profiles\desktop\node_modules\dsh-rescue-guard`
-（0.2.1 安装副本）的复制与修改而来。修改过程的每一项都对应上面列出的真实证据。
+- 设置面板的「启动救援」分区**未在真实浏览器渲染验证**（本机无法操作宿主面板）。
+  只做了静态安全校验（不传 locale、回调有 try/catch、组件导入齐全）。
+  首次装上后若白屏，优先查这三条。
+- `bin/rescue-console.cmd` 的**真机双击**环境（工作目录 / UAC / 杀软）未测；
+  已用 `cmd /c rescue-console.cmd` 验证菜单渲染与 Node 探测。
