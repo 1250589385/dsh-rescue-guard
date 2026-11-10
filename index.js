@@ -28,6 +28,7 @@ import { createSnapshot, listSnapshots, shouldSnapshot } from './lib/snapshot.js
 import { captureFingerprint, describeDiff, diffFingerprints } from './lib/fingerprint.js'
 import { inspectCookieDatabase, inspectCookies, MAX_HEADER_BYTES, newestCookieBackup } from './lib/cookies.js'
 import { readConfig } from './lib/config.js'
+import { offerDesktopRescue, writeApplyError } from './lib/desktop-offer.js'
 
 /** How long after a start-up we consider it proven, when no route has been hit yet. */
 const HEALTHY_BOOT_GRACE_MS = 25_000
@@ -160,8 +161,24 @@ export function apply(ctx) {
       /* snapshotting is best effort */
     }
 
-    for (const dispose of registerRoutes(ctx, { profileDir: paths.profileDir, home: paths.home, cliHint, pluginDir: pluginRoot() })) {
-      disposers.push(dispose)
+    // Route registration gets its own black box: when THIS is the step that fails, the outer
+    // catch would otherwise degrade everything (commands, prompt, restore) with one anonymous
+    // error, and the reason would be invisible in the live host.
+    try {
+      for (const dispose of registerRoutes(ctx, { profileDir: paths.profileDir, home: paths.home, cliHint, pluginDir: pluginRoot() })) {
+        disposers.push(dispose)
+      }
+    } catch (error) {
+      writeApplyError(paths.profileDir, error, 'registerRoutes')
+      throw error
+    }
+
+    // First install on a Desktop host: offer the standalone rescue entry once. Detached, so the
+    // Host process never waits on the dialog.
+    try {
+      offerDesktopRescue({ profileDir: paths.profileDir, pluginDir: pluginRoot(), env: process.env })
+    } catch {
+      /* an unreachable dialog must never break the boot */
     }
 
     // Confirm the boot on a timer, not only when a route is hit.
@@ -293,6 +310,9 @@ export function apply(ctx) {
       }
     }
   } catch (error) {
+    // The black box: without this, a live-host degradation is invisible — on 2026-11-09 the
+    // reason could only be guessed at. The report is what turns the next restart into a diagnosis.
+    writeApplyError(paths.profileDir, error, 'apply')
     ctx.logger?.error?.(`[dsh-rescue] apply 失败，已降级：${error?.message ?? error}`)
     return () => {
       for (const handle of timers) clearTimeout(handle)
