@@ -18,6 +18,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerRoutes } from './lib/routes.js'
@@ -25,6 +26,8 @@ import { beginBoot, confirmBoot, readBoot, rescueDir, resolvePaths } from './lib
 import { arm, confirmHealthyBoot, disarm, status } from './lib/safemode.js'
 import { createSnapshot, listSnapshots, shouldSnapshot } from './lib/snapshot.js'
 import { captureFingerprint, describeDiff, diffFingerprints } from './lib/fingerprint.js'
+import { inspectCookieDatabase, inspectCookies, MAX_HEADER_BYTES, newestCookieBackup } from './lib/cookies.js'
+import { readConfig } from './lib/config.js'
 
 /** How long after a start-up we consider it proven, when no route has been hit yet. */
 const HEALTHY_BOOT_GRACE_MS = 25_000
@@ -178,6 +181,63 @@ export function apply(ctx) {
           /* a marker we cannot write must never break a running boot */
         }
       }, HEALTHY_BOOT_GRACE_MS)
+    )
+
+    // Cookie hygiene, deferred and never awaited: a start-up that is already working must not be
+    // slowed down (or failed) by a diagnostic. Reading the live jar fails while Chromium holds it
+    // open — which is exactly the case here — so this reports only when it *can* read, and the
+    // CLI's `cookies` command is the one that runs while DSH is closed.
+    timers.push(
+      setTimeout(() => {
+        // The live jar is locked for as long as DSH runs, so a direct read is *guaranteed* to
+        // fail here. Falling back to the newest prune backup is what makes this probe able to
+        // report anything at all — and that number is the one that predicts the next start-up.
+        const measure = async () => {
+          const live = await inspectCookies().catch(() => null)
+          if (live?.worst && !live.worst.error) return { report: live, source: 'live' }
+          const backup = newestCookieBackup()
+          if (!backup) return null
+          const db = await inspectCookieDatabase(backup.file, path.join(os.tmpdir(), 'dsh-rescue-cookies')).catch(() => null)
+          if (!db) return null
+          return { report: { worst: db, level: db.level }, source: backup.file, at: backup.at }
+        }
+        measure()
+          .then((result) => {
+            const worst = result?.report?.worst
+            if (!worst || worst.error) return
+            const from = result.source === 'live' ? '' : `（按最近备份 ${String(result.at ?? '').slice(0, 19)} 估算）`
+            // The policy lives in ~/.dsh/rescue-guard/config.json so the CLI honours the same
+            // values when the Host cannot start (which is when they matter). Auto-clean below
+            // cannot act here — Chromium owns the file while DSH runs — so it states what the
+            // next clean start-up will do instead of pretending it already happened.
+            let policy = null
+            try {
+              policy = readConfig()
+            } catch {
+              policy = null
+            }
+            if (policy?.cookies?.autoClean === true && worst.level === 'broken') {
+              ctx.logger?.warn?.(
+                `[dsh-rescue] Cookie ${from}头约 ${worst.projected} 字节（上限 ${MAX_HEADER_BYTES}），已开启自动清理：` +
+                  `退出 DSH 后执行 dsh-rescue cookies --prune（保留最新 ${policy.cookies.keepNewest} 条），或在设置面板点「立即清理」。`
+              )
+            }
+            if (worst.level === 'broken') {
+              ctx.logger?.warn?.(
+                `[dsh-rescue] Cookie ${from}头约 ${worst.projected} 字节（上限 ${MAX_HEADER_BYTES}），` +
+                  `dsh-auth-* ${worst.authCookies} 条。下次启动可能报「Web authentication failed」。` +
+                  '退出 DSH 后运行：dsh-rescue cookies --prune'
+              )
+            } else if (worst.level === 'warn') {
+              ctx.logger?.info?.(
+                `[dsh-rescue] Cookie ${from}头约 ${worst.projected} 字节（${Math.round(worst.ratio * 100)}% 上限），建议抽空清理：dsh-rescue cookies --prune`
+              )
+            }
+          })
+          .catch(() => {
+            /* the jar is locked while DSH runs; silence is correct here */
+          })
+      }, HEALTHY_BOOT_GRACE_MS + 5_000)
     )
 
     // Safe mode was armed before this launch, and this launch is now up: put the bundles back.
