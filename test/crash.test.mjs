@@ -121,10 +121,13 @@ test('CAUSES exposes the six stable ids with the documented shape', () => {
     assert.equal(typeof cause.preventable, 'boolean')
     assert.equal(typeof cause.action, 'string')
   }
-  // The two causes the precheck can actually prevent; the rest need rescue, not warnings.
+  // Causes the precheck can actually prevent; the rest need rescue, not warnings.
   assert.equal(CAUSES.missing_file.preventable, true)
   assert.equal(CAUSES.command_clash.preventable, true)
-  assert.equal(CAUSES.web_auth.preventable, false)
+  // 0.4.0: `cookies` can now measure and fix the observed cause of this dialog (accumulated
+  // dsh-auth-* cookies pushing the request header past Node's 16 KiB maxHeaderSize), so the
+  // "authentication failed" bucket stopped being unfixable. See PROVENANCE 0.4.0.
+  assert.equal(CAUSES.web_auth.preventable, true)
 })
 
 // --- classification: one case per branch -------------------------------------------
