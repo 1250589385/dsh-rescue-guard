@@ -164,6 +164,15 @@ const jar = diag.cookies?.report ?? {}
 assert.equal(jar.authCookies, TOKENS, 'the seeded jar must be measured, not the empty partition one')
 assert.equal(jar.level, 'broken', '60 tokens must measure as a real problem')
 
+// 0.5.3 additions: the settings page needs the desktop-entry and preflight endpoints.
+const desktopEntry = await resFor('/desktop-entry.json', makeBody({}))
+assert.equal(desktopEntry.ok, true, '/desktop-entry.json must answer')
+assert.ok(desktopEntry.path || desktopEntry.reason, 'desktop-entry reports a path or a reason')
+
+const pre = await resFor('/preflight.json', makeBody({}))
+assert.equal(pre.ok, true, '/preflight.json must answer')
+assert.equal(typeof pre.okToUpdate, 'boolean', 'preflight must return a verdict')
+
 const routeCount = routes.size
 dispose()
 
