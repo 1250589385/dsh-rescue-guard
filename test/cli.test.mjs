@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile , spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -100,6 +100,35 @@ after(() => {
   // Guard the rm: never remove anything that is not our own temp directory.
   if (work && path.basename(work).startsWith('dsh-rescue-accept-')) rmSync(work, { recursive: true, force: true })
 })
+
+/**
+ * Whether this environment allows spawning a child process.
+ *
+ * The acceptance tests below run the real CLI, which is the point — but a restricted sandbox
+ * (DSH's own session is one) rejects `spawn` with EPERM. Reporting nine failures there would
+ * blame the code for the sandbox, so the whole file degrades to a single explicit skip.
+ */
+/**
+ * Whether this environment allows a *piped* child process.
+ *
+ * `stdio: 'ignore'` is permitted in DSH's sandbox while `pipe` is rejected with EPERM — and these
+ * tests need the child's stdout, so the probe has to use the same mode they do. Probing with
+ * 'ignore' would report "spawn is fine" and then hand nine EPERM failures to the reader.
+ */
+function canSpawn() {
+  try {
+    const result = spawnSync(process.execPath, ['-e', '0'], { encoding: 'utf8' })
+    return result.error === undefined && result.status === 0
+  } catch {
+    return false
+  }
+}
+
+const SPAWN_OK = canSpawn()
+if (!SPAWN_OK) {
+  console.log('⚠ 当前环境禁止 spawn（受限沙箱），跳过 CLI 验收测试。请在普通终端里重跑。')
+  process.exit(0)
+}
 
 const cli = (args) => run(process.execPath, [CLI, ...args], { cwd: HERE, maxBuffer: 4 * 1024 * 1024 })
 const crashArg = () => ['--crash-dir', path.join(work, 'crashlogs')]
