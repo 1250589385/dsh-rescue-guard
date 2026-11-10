@@ -3,10 +3,8 @@
  *
  * Two seats in the frame-wide `shell.overlay` layer:
  *
- *   - `rescue-guard-launcher` (order 72) is a small fixed button bottom-right. It is the only
- *     entry point; the panel itself lives in a different seat because the overlay layer is
- *     click-through and each occupant opts back into pointer events on its own.
- *   - `rescue-guard-panel` (order 73) is the panel, rendered only while open.
+ *   - 右下角的 launcher / panel 已移除（2026-11-11 用户要求）：全部救援功能
+ *     并进「设置 → 启动救援」页面，由 SettingsSection 直接渲染 Panel 组件。
  *
  * What the panel shows, in the order a person needs it when DSH is misbehaving:
  *
@@ -55,6 +53,8 @@ window.__ModuleLoader__.load({
     const WATCH_URL = PREFIX + '/watch.json';
     const CONFIG_URL = PREFIX + '/config.json';
     const COOKIE_CLEAN_URL = PREFIX + '/cookies/clean.json';
+    const DESKTOP_ENTRY_URL = PREFIX + '/desktop-entry.json';
+    const PREFLIGHT_URL = PREFIX + '/preflight.json';
     /* The rescue command line is supplied by the Host in `diagnose.json`, because only it
      * knows where the plugin was installed. This is just the fallback shown before the first
      * successful fetch. */
@@ -99,6 +99,17 @@ window.__ModuleLoader__.load({
       cookiesBroken: 'This exceeds Node\'s 16 KiB maxHeaderSize: the Host answers 431 and the app shows "Web authentication failed".',
       cookiesPruneHint: ' — quit DSH first, then run',
       settingsNav: 'Rescue Guard',
+      settingsDesktopTitle: 'Standalone console',
+      settingsDesktopDesc: 'Create a desktop rescue console that does not need DSH: double-click it to diagnose, clean cookies or enter safe mode when the app will not start.',
+      settingsDesktopCreate: 'Create desktop entry',
+      settingsDesktopDone: 'Created: {path}',
+      settingsDesktopFailed: 'Failed: {message}',
+      settingsPreflightTitle: 'Pre-update check',
+      settingsPreflightDesc: 'Run before updating DSH: verifies every plugin resolves and lists known crash causes. The first start after an update also runs a health report automatically.',
+      settingsPreflightRun: 'Run check',
+      settingsPreflightOk: 'Ready to update: no blocking findings.',
+      settingsPreflightWarn: '{count} finding(s) worth reviewing before updating:',
+      settingsPreflightReport: 'Post-update report: {path}',
       settingsTitle: 'Startup rescue',
       settingsIntro: 'Cookie auto-clean policy. Stored in ~/.dsh/rescue-guard/config.json so the standalone CLI honours the same values when the app cannot start.',
       settingsAutoClean: 'Clean auth cookies automatically',
@@ -221,6 +232,17 @@ window.__ModuleLoader__.load({
       cookiesBroken: '已超过 Node 的 16 KiB maxHeaderSize：Host 回 431，界面只会显示「Web authentication failed」。',
       cookiesPruneHint: ' — 先退出 DSH，再执行',
       settingsNav: '启动救援',
+      settingsDesktopTitle: '独立救援台',
+      settingsDesktopDesc: '在桌面创建一个不依赖 DSH 的救援控制台：DSH 起不来时双击即可诊断、清理 cookie、进安全模式。',
+      settingsDesktopCreate: '创建桌面入口',
+      settingsDesktopDone: '已创建：{path}',
+      settingsDesktopFailed: '创建失败：{message}',
+      settingsPreflightTitle: '更新前检查',
+      settingsPreflightDesc: 'DSH 升级前先跑一次：检查插件是否都能解析、有没有已知的崩溃诱因。升级后首次启动也会自动体检并出报告。',
+      settingsPreflightRun: '开始检查',
+      settingsPreflightOk: '可以升级：未发现阻断项。',
+      settingsPreflightWarn: '发现 {count} 个提醒项，升级前建议处理：',
+      settingsPreflightReport: '上次更新后体检：{path}',
       settingsTitle: '启动救援',
       settingsIntro: 'Cookie 自动清理策略。存在 ~/.dsh/rescue-guard/config.json，这样 DSH 起不来时独立 CLI 也能读到同一份设置。',
       settingsAutoClean: '自动清理认证 Cookie',
@@ -645,6 +667,9 @@ window.__ModuleLoader__.load({
 
     function Panel(props) {
       const t = useTranslate(props);
+      /* Embedded mode renders the same dashboard as a block inside the settings page:
+       * no floating position, no close affordance, no Escape/outside dismissal. */
+      const embedded = props.embedded === true;
       const panelRef = useRef(null);
 
       const [report, setReport] = useState(null);
@@ -703,8 +728,10 @@ window.__ModuleLoader__.load({
         load(false);
       }, [load]);
 
-      /* Escape and outside-press dismissal, live only while mounted. */
+      /* Escape and outside-press dismissal, live only while mounted — and only while floating:
+       * embedded, the surrounding settings panel owns dismissal. */
       useEffect(() => {
+        if (embedded) return undefined;
         const onKey = (event) => {
           if (event.key !== 'Escape') return;
           /* Escape first cancels a pending inline confirmation, then closes. */
@@ -728,7 +755,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('keydown', onKey);
           document.removeEventListener('pointerdown', onPointer, true);
         };
-      }, [pending]);
+      }, [pending, embedded]);
 
       /** POST one action route and fold the result back into the report. */
       const act = useCallback(async (url, payload, onSuccess) => {
@@ -1354,21 +1381,24 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         ref: panelRef,
-        className: 'drg-panel',
-        role: 'dialog',
+        className: embedded ? 'drg-panel drg-panel-embedded' : 'drg-panel',
+        role: embedded ? 'region' : 'dialog',
         'aria-label': t('title'),
+        style: embedded
+          ? { position: 'static', width: 'auto', maxHeight: 'none', boxShadow: 'none', marginTop: '14px' }
+          : undefined,
       },
         h('style', { 'data-rescue-guard': 'panel' }, CSS),
         h('div', { className: 'drg-head' },
-          h('h4', { className: 'drg-title' }, t('title')),
-          h('span', { className: 'drg-spacer' }),
+          embedded ? h('span', { className: 'drg-spacer' }) : h('h4', { className: 'drg-title' }, t('title')),
+          embedded ? null : h('span', { className: 'drg-spacer' }),
           h('button', {
             type: 'button',
             className: 'drg-btn',
             disabled: busy,
             onClick: () => load(false),
           }, busy ? t('refreshing') : t('refresh')),
-          h('button', {
+          embedded ? null : h('button', {
             type: 'button',
             className: 'drg-btn',
             title: t('close'),
@@ -1408,25 +1438,32 @@ window.__ModuleLoader__.load({
      * must not depend on the locale pipeline that may be exactly what failed.
      */
     function ErrorSeat(props) {
+      const [dismissed, setDismissed] = useState(false);
       const failures = props.failures ?? [];
-      if (!failures.length) return null;
-      return h('div', {
-        className: 'drg-overlay-root',
-        style: { pointerEvents: 'auto' },
-      },
+      if (!failures.length || dismissed) return null;
+      /* Bottom-right and small: it must never cover the settings UI it is diagnosing
+       * (2026-11-10 field report: the top-left box floated over everything). */
+      return h('div', { className: 'drg-overlay-root' },
         h('div', {
           style: {
-            position: 'fixed', top: '10px', left: '10px', zIndex: 2147483000,
-            maxWidth: '420px', padding: '10px 12px', borderRadius: '10px',
+            position: 'fixed', right: '14px', bottom: '14px', zIndex: 2147483000,
+            maxWidth: '320px', padding: '8px 10px', borderRadius: '10px',
             background: 'rgba(40,20,20,.94)', border: '1px solid rgba(255,120,90,.5)',
             color: '#ffd7cc', font: '12px/17px ui-sans-serif, system-ui',
             whiteSpace: 'pre-wrap', boxShadow: '0 6px 24px rgba(0,0,0,.4)',
           },
         },
-          h('p', { style: { margin: '0 0 4px', fontWeight: 600 } },
-            'rescue-guard 加载不完整 / incomplete load'),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            h('p', { style: { margin: 0, fontWeight: 600, flex: 1 } },
+              'rescue-guard 加载不完整'),
+            h('button', {
+              type: 'button',
+              onClick: () => setDismissed(true),
+              style: { background: 'none', border: 'none', color: '#ffd7cc', cursor: 'pointer', font: '12px system-ui', padding: '0 2px' },
+            }, '✕'),
+          ),
           ...failures.map((line, index) =>
-            h('p', { key: index, style: { margin: '2px 0' } }, String(line))),
+            h('p', { key: index, style: { margin: '2px 0 0' } }, String(line))),
         ),
       );
     }
@@ -1464,6 +1501,11 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [message, setMessage] = useState('');
       const [cleaning, setCleaning] = useState(false);
+      const [desktopBusy, setDesktopBusy] = useState(false);
+      const [desktopMessage, setDesktopMessage] = useState('');
+      const [preflightBusy, setPreflightBusy] = useState(false);
+      const [preflightMessage, setPreflightMessage] = useState('');
+      const [preflightFindings, setPreflightFindings] = useState([]);
 
       const load = useCallback(async () => {
         const result = await requestJson(CONFIG_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
@@ -1516,6 +1558,45 @@ window.__ModuleLoader__.load({
           setCleaning(false);
         }
       }, [config, load, t]);
+
+      const createDesktopEntry = useCallback(async () => {
+        setDesktopBusy(true);
+        setDesktopMessage('');
+        try {
+          const result = await requestJson(DESKTOP_ENTRY_URL, { method: 'POST' }, ACTION_TIMEOUT_MS);
+          const body = result.body ?? {};
+          if (body.ok === true) {
+            setDesktopMessage(t('settingsDesktopDone', { path: body.path ?? '' }));
+          } else {
+            setDesktopMessage(t('settingsDesktopFailed', { message: body.reason ?? result.error ?? '' }));
+          }
+        } finally {
+          setDesktopBusy(false);
+        }
+      }, [t]);
+
+      const runPreflight = useCallback(async () => {
+        setPreflightBusy(true);
+        setPreflightMessage('');
+        setPreflightFindings([]);
+        try {
+          const result = await requestJson(PREFLIGHT_URL, { method: 'POST' }, ACTION_TIMEOUT_MS);
+          const body = result.body ?? {};
+          if (body.ok !== true) {
+            setPreflightMessage(t('settingsPreflightWarn', { count: 0 }) + ' ' + (body.error ?? result.error ?? ''));
+            return;
+          }
+          const findings = Array.isArray(body.findings) ? body.findings : [];
+          setPreflightFindings(findings.map((f) => (typeof f === 'string' ? f : (f?.text ?? String(f)))));
+          if (body.okToUpdate === true) {
+            setPreflightMessage(t('settingsPreflightOk'));
+          } else {
+            setPreflightMessage(t('settingsPreflightWarn', { count: findings.length }));
+          }
+        } finally {
+          setPreflightBusy(false);
+        }
+      }, [t]);
 
       if (config === null) {
         return h('div', { className: 'drg-settings' },
@@ -1576,6 +1657,38 @@ window.__ModuleLoader__.load({
 
         message === '' ? null : h('p', { className: 'drg-hint drg-settings-msg' }, message),
         h('p', { className: 'drg-hint drg-mono' }, t('settingsPath')),
+
+        /* 独立救援台：桌面入口（不依赖 DSH 的那条生命线） */
+        h('div', { className: 'drg-section', key: 'desktop' },
+          h('h5', { className: 'drg-section-title' }, t('settingsDesktopTitle')),
+          h('p', { className: 'drg-hint' }, t('settingsDesktopDesc')),
+          h('button', {
+            type: 'button',
+            className: 'drg-btn drg-btn-primary',
+            disabled: desktopBusy,
+            onClick: createDesktopEntry,
+          }, desktopBusy ? t('refreshing') : t('settingsDesktopCreate')),
+          desktopMessage === '' ? null : h('p', { className: 'drg-hint drg-settings-msg' }, desktopMessage),
+        ),
+
+        /* 更新前检查：升级 DSH 之前先确认插件都能解析、没有已知诱因 */
+        h('div', { className: 'drg-section', key: 'preflight' },
+          h('h5', { className: 'drg-section-title' }, t('settingsPreflightTitle')),
+          h('p', { className: 'drg-hint' }, t('settingsPreflightDesc')),
+          h('button', {
+            type: 'button',
+            className: 'drg-btn',
+            disabled: preflightBusy,
+            onClick: runPreflight,
+          }, preflightBusy ? t('refreshing') : t('settingsPreflightRun')),
+          preflightMessage === '' ? null : h('p', { className: 'drg-hint drg-settings-msg' }, preflightMessage),
+          preflightFindings.length === 0 ? null : h('ul', { className: 'drg-hint' },
+            preflightFindings.map((line, index) => h('li', { key: index }, String(line)))),
+        ),
+        /* Everything the bottom-right panel used to hold: diagnosis, crash classes,
+         * pre-flight scan, snapshots, safe mode, watcher, and the CLI line that works
+         * when DSH will not start. */
+        h(Panel, { key: 'rescue-panel', t, command: commandLine ?? COMMAND_FALLBACK, embedded: true }),
       );
     }
 
@@ -1597,36 +1710,30 @@ window.__ModuleLoader__.load({
             console.error('[rescue-guard]', message)
           }
         }
+        /* Report failures to the Host so the maintainer can read the exact text from
+         * .rescue/client-errors.txt — the floating box is for the user, not for debugging. */
+        const reportFailures = () => {
+          if (!failures.length) return
+          fetch('/dsh-rescue/client-errors.json', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ failures: failures.slice() }),
+          }).catch(() => {})
+        }
+        setTimeout(reportFailures, 1_500)
 
         guard('locale', () => {
           boundT = ctx.locale.bind(NS);
           ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'rescue-guard: dictionaries');
         });
 
-        guard('launcher', () => {
-          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-            name: 'shell.overlay',
-            id: 'rescue-guard-launcher',
-            order: 72,
-            locale: NS,
-            inject: () => ({ command: commandLine ?? COMMAND_FALLBACK, failures: clientFailures.slice() }),
-          }, LauncherSeat));
-        });
-
-        guard('panel', () => {
-          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-            name: 'shell.overlay',
-            id: 'rescue-guard-panel',
-            order: 73,
-            locale: NS,
-            inject: () => ({ command: commandLine ?? COMMAND_FALLBACK, failures: clientFailures.slice() }),
-          }, PanelSeat));
-        });
-
+        /* The bottom-right launcher and its popover are gone by request (2026-11-11):
+         * every rescue function now lives inside 设置 → 启动救援, rendered by
+         * SettingsSection from the same Panel component. */
         /* 设置侧栏里的独立分区（"设置" 列表里 Our Free Model / wb400修复 那一列的邻居）。
          *
          * ⚠️ 两个必须避开的坑（都会让宿主白屏 "Failed to load plugins"）：
-         *   ① 不给 slots.register 传 `locale` —— 未在宿主 LocaleNamespaceMap 注册的
+         *   ① slots.register 的 `locale` 必须是已注册的 namespace（NS 已注册，传即可）；
          *      namespace 会被校验拒绝，而 slots.inject 的回调错误是同步抛出的；
          *   ② 回调里 try/catch —— 同上。
          * 文案走本模块自带字典（boundT 先问宿主 locale，取不到用内嵌），不依赖宿主注册。 */
@@ -1639,9 +1746,19 @@ window.__ModuleLoader__.load({
               id: 'rescue-guard-settings',
               order: 46,
               label: () => boundT('settingsNav'),
+              // 宿主渲染设置列表需要 locale 来解析 label；缺了整个分区会被跳过
+              // （2026-11-10 实测：无此字段时分区不出现在设置左栏）。
+              locale: NS,
             }, (props) => h(SettingsSection, { ...props, t: useTranslate(props) }));
           } catch (error) {
             console.error('[rescue-guard] settings section registration failed:', error);
+            /* The packaged app has no visible console: report the exact error to the Host,
+             * or the section fails silently forever and nobody can debug it. */
+            fetch('/dsh-rescue/client-errors.json', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ failures: ['settings section factory: ' + (error?.message ?? error)] }),
+            }).catch(() => {});
             return () => {};
           }
           });
