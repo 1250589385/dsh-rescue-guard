@@ -59,6 +59,9 @@ window.__ModuleLoader__.load({
      * knows where the plugin was installed. This is just the fallback shown before the first
      * successful fetch. */
     const COMMAND_FALLBACK = 'dsh-rescue diagnose';
+    /* Registration failures, rendered by the error seat. Module-level because slots re-inject
+     * long after apply has returned, and because a failed apply must still be able to say why. */
+    const clientFailures = [];
     /* Updated once the first diagnose response arrives. The seats read it through a module
      * binding because slots re-inject long after `apply` has returned. */
     let commandLine = COMMAND_FALLBACK;
@@ -1400,6 +1403,34 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ the two seats */
 
+    /**
+     * Rendered only when a registration failed. Hardcoded bilingual text on purpose: this seat
+     * must not depend on the locale pipeline that may be exactly what failed.
+     */
+    function ErrorSeat(props) {
+      const failures = props.failures ?? [];
+      if (!failures.length) return null;
+      return h('div', {
+        className: 'drg-overlay-root',
+        style: { pointerEvents: 'auto' },
+      },
+        h('div', {
+          style: {
+            position: 'fixed', top: '10px', left: '10px', zIndex: 2147483000,
+            maxWidth: '420px', padding: '10px 12px', borderRadius: '10px',
+            background: 'rgba(40,20,20,.94)', border: '1px solid rgba(255,120,90,.5)',
+            color: '#ffd7cc', font: '12px/17px ui-sans-serif, system-ui',
+            whiteSpace: 'pre-wrap', boxShadow: '0 6px 24px rgba(0,0,0,.4)',
+          },
+        },
+          h('p', { style: { margin: '0 0 4px', fontWeight: 600 } },
+            'rescue-guard 加载不完整 / incomplete load'),
+          ...failures.map((line, index) =>
+            h('p', { key: index, style: { margin: '2px 0' } }, String(line))),
+        ),
+      );
+    }
+
     function PanelSeat(props) {
       const t = useTranslate(props);
       const open = useOpen();
@@ -1553,26 +1584,44 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
-        boundT = ctx.locale.bind(NS);
-        ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'rescue-guard: dictionaries');
+        /* Per-registration guards: one throw must not take the module down silently — that is
+         * how the settings section went missing on a live host with every static check green.
+         * Failures land in the error seat so they are visible without devtools. */
+        const failures = []
+        const guard = (label, fn) => {
+          try {
+            fn()
+          } catch (error) {
+            const message = `${label}: ${error?.message ?? error}`
+            failures.push(message)
+            console.error('[rescue-guard]', message)
+          }
+        }
 
-        /* Two seats, deliberately different ids and orders: the overlay layer is click-through
-         * and each occupant opts back into pointer events on its own. */
-        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-          name: 'shell.overlay',
-          id: 'rescue-guard-launcher',
-          order: 72,
-          locale: NS,
-          inject: () => ({ command: commandLine ?? COMMAND_FALLBACK }),
-        }, LauncherSeat));
+        guard('locale', () => {
+          boundT = ctx.locale.bind(NS);
+          ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'rescue-guard: dictionaries');
+        });
 
-        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-          name: 'shell.overlay',
-          id: 'rescue-guard-panel',
-          order: 73,
-          locale: NS,
-          inject: () => ({ command: commandLine ?? COMMAND_FALLBACK }),
-        }, PanelSeat));
+        guard('launcher', () => {
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'rescue-guard-launcher',
+            order: 72,
+            locale: NS,
+            inject: () => ({ command: commandLine ?? COMMAND_FALLBACK, failures: clientFailures.slice() }),
+          }, LauncherSeat));
+        });
+
+        guard('panel', () => {
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'rescue-guard-panel',
+            order: 73,
+            locale: NS,
+            inject: () => ({ command: commandLine ?? COMMAND_FALLBACK, failures: clientFailures.slice() }),
+          }, PanelSeat));
+        });
 
         /* 设置侧栏里的独立分区（"设置" 列表里 Our Free Model / wb400修复 那一列的邻居）。
          *
@@ -1581,7 +1630,8 @@ window.__ModuleLoader__.load({
          *      namespace 会被校验拒绝，而 slots.inject 的回调错误是同步抛出的；
          *   ② 回调里 try/catch —— 同上。
          * 文案走本模块自带字典（boundT 先问宿主 locale，取不到用内嵌），不依赖宿主注册。 */
-        ctx.slots.inject('settings.section', () => {
+        guard('settings section', () => {
+          ctx.slots.inject('settings.section', () => {
           try {
             return ctx.slots.register({
               name: 'settings.section',
@@ -1594,7 +1644,22 @@ window.__ModuleLoader__.load({
             console.error('[rescue-guard] settings section registration failed:', error);
             return () => {};
           }
+          });
         });
+        /* A failing registration must be visible: render the collected failures from a seat
+         * that depends on nothing else (not locale, not the CSS string, not slots order). */
+        if (failures.length) {
+          guard('error seat', () => {
+            ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+              name: 'shell.overlay',
+              id: 'rescue-guard-errors',
+              order: 71,
+              locale: NS,
+              inject: () => ({ failures: clientFailures.slice() }),
+            }, ErrorSeat));
+          });
+        }
+        clientFailures.splice(0, clientFailures.length, ...failures);
       },
     };
   },
