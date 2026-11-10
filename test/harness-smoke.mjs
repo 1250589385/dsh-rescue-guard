@@ -30,6 +30,12 @@ const ctx = {
   webServer: { register: (row) => { routes.set(row.path, row.handler); return () => routes.delete(row.path) } },
   logger: { info: () => {}, warn: (m) => warnings.push(m), error: () => {} },
   get: () => ({ register: (spec) => commands.push(spec.name) }),
+  /* The real host refuses `ctx.webServer` without a declared inject (the 2026-11-11 black-box
+   * finding), so the stub must honour the same contract: resolve the deps and hand back this
+   * ctx. Without this, the smoke passes on code that can never register routes for real. */
+  inject(deps, cb) {
+    return cb(this)
+  },
 }
 
 const profile = mkdtempSync(path.join(os.tmpdir(), 'dsh-rescue-smoke-'))
