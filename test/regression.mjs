@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * Regression suite for 0.3.0.
+ * Regression suite for 0.4.0.
  *
- * Every case here is a bug or a blind spot that actually happened on 2026-11-09. Run with:
+ * Every case here is a bug or a blind spot that actually happened on this machine:
+ * 2026-11-09 (dsh-ops hooked an internal event) and 2026-11-10 (71 auth cookies → 431 → the
+ * "Web authentication failed" dialog). Run with:
  *   node test/regression.mjs
  * No dependencies, no DSH: it builds throwaway profiles in the OS temp dir.
  */
 
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fixtures = path.join(here, 'fixtures')
@@ -215,6 +217,191 @@ console.log('\n[7] 宿主版本候选（读不到时如实返回 null，不编�
   check('无宿主信息时 hostVersion 为 null', () => eq(fp.hostVersion, null, 'hostVersion'))
   check('候选列表为空而非伪造', () => eq(fp.hostVersionCandidates.length, 0, '候选数'))
   rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[8] Cookie 体积判定（2026-11-10：71 条 dsh-auth / 16186 字节 → 431）')
+{
+  const base = path.join(os.tmpdir(), 'rescue-cookie-' + Date.now())
+  const file = path.join(base, 'Cookies')
+  mkdirSync(base, { recursive: true })
+  // Build a real Chromium-shaped jar: the columns `inspectCookieDatabase` reads.
+  const DatabaseSync = (await import('node:sqlite')).DatabaseSync
+  const db = new DatabaseSync(file)
+  db.exec(`CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+    CREATE TABLE cookies(creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL, top_frame_site_key TEXT NOT NULL,
+      name TEXT NOT NULL, value TEXT NOT NULL, encrypted_value BLOB NOT NULL, path TEXT NOT NULL,
+      expires_utc INTEGER NOT NULL, is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL,
+      last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL, is_persistent INTEGER NOT NULL,
+      priority INTEGER NOT NULL, samesite INTEGER NOT NULL, source_scheme INTEGER NOT NULL,
+      source_port INTEGER NOT NULL, last_update_utc INTEGER NOT NULL, source_type INTEGER NOT NULL,
+      has_cross_site_ancestor INTEGER NOT NULL)`)
+  const insert = db.prepare('INSERT INTO cookies VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+  const write = (name, value, created) => insert.run(created, '127.0.0.1', '', name, value, Buffer.alloc(0), '/', created, 0, 1, created, 1, 1, 1, 2, 1, 0, created, 0, 0)
+  // 71 tokens × (51-char name + 173-char value + 2) ≈ 16000 bytes, the observed breaking point.
+  for (let i = 0; i < 71; i++) write('dsh-auth-' + String(i).padEnd(43, 'x'), 'v'.repeat(173), 13300000000000000 + i)
+  db.close()
+
+  const mod = await import('../lib/cookies.js')
+  const before = await mod.inspectCookieDatabase(file, base)
+  check('识别 71 条 dsh-auth 令牌', () => eq(before.authCookies, 71, 'dsh-auth 条数'))
+  check('Cookie 头估算接近实测 16117 字节', () => {
+    assert(Math.abs(before.headerBytes - 16065) < 200, '实际 ' + before.headerBytes)
+  })
+  check('加上其它请求头后判为 broken', () => eq(before.level, 'broken', 'level'))
+
+  const dry = await mod.pruneAuthCookies({ file, backupDir: path.join(base, 'bak'), dryRun: true })
+  check('dry-run 不删任何东西', () => {
+    eq(dry.removed, 0, 'removed')
+    eq(dry.before, 71, 'before')
+  })
+
+  const keep = await mod.pruneAuthCookies({ file, backupDir: path.join(base, 'bak'), keepNewest: 5 })
+  check('--keep 5 只保留 5 条', () => {
+    eq(keep.after, 5, 'after')
+    eq(keep.removed, 66, 'removed')
+  })
+  check('清理前已备份', () => assert(existsSync(keep.backup), '备份文件不存在'))
+
+  const kept = await mod.inspectCookieDatabase(file, base)
+  check('清理后判为 ok', () => eq(kept.level, 'ok', 'level'))
+  check('数据库完整性未损坏', () => {
+    const probe = new DatabaseSync(file)
+    const row = probe.prepare('PRAGMA integrity_check').get()
+    probe.close()
+    eq(row.integrity_check, 'ok', 'integrity')
+  })
+
+  const all = await mod.pruneAuthCookies({ file, backupDir: path.join(base, 'bak') })
+  check('默认全删', () => eq(all.after, 0, 'after'))
+  rmSync(base, { recursive: true, force: true })
+}
+
+console.log('\n[9] 救援台菜单（.cmd 只能是纯 ASCII，中文由 Node 渲染）')
+{
+  const cmdPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'rescue-console.cmd')
+  const bytes = readFileSync(cmdPath)
+  check('rescue-console.cmd 是纯 ASCII', () => {
+    const bad = [...bytes].filter((b) => b > 127).length
+    eq(bad, 0, '非 ASCII 字节数（cmd.exe 按控制台代码页解析批处理，中文会被拆错）')
+  })
+  check('.cmd 自己会找 Node 而不是依赖 PATH', () => {
+    const text = bytes.toString('utf8')
+    assert(/if not defined NODE/.test(text), '缺少 node 探测')
+    assert(/dsh-primary-runtime/.test(text), '未探测 DSH 自带运行时')
+    assert(/"%SCRIPT%"?\s+menu/.test(text), '未把 menu 交给 Node')
+  })
+
+  const { MENU, choose, displayWidth } = await import('../lib/menu.js')
+  check('菜单覆盖全部动作 + 退出', () => {
+    // 12 = 9 original actions + policy/on/off + quit.
+    eq(MENU.length, 13, '行数')
+  })
+  check('CJK 按双宽计算', () => {
+    eq(displayWidth('abc'), 3, 'ascii')
+    eq(displayWidth('救援台'), 6, 'cjk')
+  })
+  check('未知按键不执行任何命令', async () => {})
+  const unknown = await choose('z', { ask: async () => '', run: async () => 0 })
+  check('未知按键返回 unknown', () => eq(unknown.unknown, true, 'unknown'))
+  const quit = await choose('0', { ask: async () => '', run: async () => 0 })
+  check('按 0 退出且不执行命令', () => {
+    eq(quit.quit, true, 'quit')
+  })
+  let ran = null
+  const diag = await choose('1', { ask: async () => '', run: async (argv) => { ran = argv; return 0 } })
+  check('按 1 派发 diagnose', () => {
+    eq(ran.join(' '), 'diagnose', 'argv')
+    eq(diag.code, 0, 'code')
+  })
+  // 清理 Cookie 需要二次确认，且确认才会执行
+  ran = null
+  const declined = await choose('3', { ask: async () => 'N', run: async (argv) => { ran = argv; return 0 } })
+  check('清理 Cookie 时回答 N 不执行', () => {
+    eq(declined.cancelled, true, 'cancelled')
+    eq(ran, null, '不应执行')
+  })
+  ran = null
+  await choose('3', { ask: async () => 'Y', run: async (argv) => { ran = argv; return 0 } })
+  check('回答 Y 后执行 cookies --prune', () => eq(ran.join(' '), 'cookies --prune', 'argv'))
+  // 禁用插件需要包名
+  ran = null
+  await choose('8', { ask: async () => 'dsh-ops', run: async (argv) => { ran = argv; return 0 } })
+  check('禁用插件把包名拼进 argv', () => eq(ran.join(' '), 'disable dsh-ops', 'argv'))
+}
+
+console.log('\n[10] 自动清理策略（设置面板与 CLI 共用一份文件）')
+{
+  const home = path.join(os.tmpdir(), 'rescue-cfg-' + Date.now())
+  const cfg = await import('../lib/config.js')
+
+  check('缺文件时回落到默认（不抛）', () => {
+    const c = cfg.readConfig(home)
+    eq(c.cookies.autoClean, false, 'autoClean')
+    eq(c.cookies.keepNewest, 0, 'keepNewest')
+  })
+  check('写入后可重读', () => {
+    cfg.writeConfig({ cookies: { autoClean: true, keepNewest: 3 } }, home)
+    const c = cfg.readConfig(home)
+    eq(c.cookies.autoClean, true, 'autoClean')
+    eq(c.cookies.keepNewest, 3, 'keepNewest')
+  })
+  check('写入是深合并，不丢未提及字段', () => {
+    cfg.writeConfig({ cookies: { keepNewest: 7 } }, home)
+    const c = cfg.readConfig(home)
+    eq(c.cookies.autoClean, true, 'autoClean 应保持')
+    eq(c.cookies.keepNewest, 7, 'keepNewest')
+    assert(typeof c.cookies.warnRatio === 'number', 'warnRatio 应保留默认')
+  })
+  check('损坏的 JSON 回落默认而不抛', () => {
+    writeFileSync(cfg.configPath(home), '{ this is not json')
+    const c = cfg.readConfig(home)
+    eq(c.cookies.autoClean, false, 'autoClean')
+  })
+  check('非法值被规范化', () => {
+    writeFileSync(cfg.configPath(home), JSON.stringify({ cookies: { autoClean: 'yes', keepNewest: -5 } }))
+    const c = cfg.readConfig(home)
+    eq(c.cookies.autoClean, false, 'autoClean 只接受 boolean')
+    eq(c.cookies.keepNewest, 0, 'keepNewest 不接受负数')
+  })
+  rmSync(home, { recursive: true, force: true })
+}
+
+console.log('\n[11] cookie 库选择（空分区库不能盖过真正的库）')
+{
+  const mod = await import('../lib/cookies.js')
+  // Two jars: one empty 'ok', one full 'broken'. Ranking by level alone would pick either;
+  // ranking by "has tokens" must pick the full one.
+  const base = path.join(os.tmpdir(), 'rescue-pick-' + Date.now())
+  const DatabaseSync = (await import('node:sqlite')).DatabaseSync
+  const build = (file, count) => {
+    mkdirSync(path.dirname(file), { recursive: true })
+    const db = new DatabaseSync(file)
+    db.exec(`CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      CREATE TABLE cookies(creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL, top_frame_site_key TEXT NOT NULL,
+        name TEXT NOT NULL, value TEXT NOT NULL, encrypted_value BLOB NOT NULL, path TEXT NOT NULL,
+        expires_utc INTEGER NOT NULL, is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL,
+        last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL, is_persistent INTEGER NOT NULL,
+        priority INTEGER NOT NULL, samesite INTEGER NOT NULL, source_scheme INTEGER NOT NULL,
+        source_port INTEGER NOT NULL, last_update_utc INTEGER NOT NULL, source_type INTEGER NOT NULL,
+        has_cross_site_ancestor INTEGER NOT NULL)`)
+    const ins = db.prepare('INSERT INTO cookies VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    for (let i = 0; i < count; i += 1) {
+      ins.run(13300000000000000 + i, '127.0.0.1', '', 'dsh-auth-' + String(i).padEnd(40, 'x'), 'v'.repeat(180), Buffer.alloc(0), '/', 13300000000000000 + i, 0, 1, 13300000000000000 + i, 1, 1, 1, 2, 1, 0, 13300000000000000 + i, 0, 0)
+    }
+    db.close()
+  }
+  const userData = path.join(base, 'userData')
+  const emptyJar = path.join(userData, 'Partitions', 'hash1', 'Network', 'Cookies')
+  const fullJar = path.join(userData, 'Network', 'Cookies')
+  build(emptyJar, 0)
+  build(fullJar, 71)
+  const report = await mod.inspectCookies({ userDataDir: userData, workDir: path.join(base, 'work') })
+  check('选中含 71 条令牌的库，而非空的分区库', () => {
+    eq(report.databases.length, 2, '库数量')
+    eq(report.worst.authCookies, 71, 'worst 的令牌数')
+    eq(report.level, 'broken', 'worst level')
+  })
+  rmSync(base, { recursive: true, force: true })
 }
 
 console.log('\n' + '='.repeat(60))
