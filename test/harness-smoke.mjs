@@ -80,7 +80,7 @@ emptyDb.close()
 const { apply } = await import(PLUGIN)
 const dispose = apply(ctx)
 
-const resFor = async (path, init) => {
+const resFor = async (path, init = {}) => {
   // Registered routes are bare paths; strip any query before looking them up, matching how
   // the real server routes.
   const handler = routes.get('/dsh-rescue' + path.split('?')[0])
@@ -89,8 +89,37 @@ const resFor = async (path, init) => {
   const res = {
     writeHead() {}, end(body) { chunks.push(body ?? '') },
   }
-  await handler({ url: path, method: init?.method ?? 'GET', on: () => {}, ...init }, res)
+  const method = init?.method ?? 'GET'
+  /* Loopback + auth, because the routes now enforce both (review S1): a stub request without a
+   * socket looks like a remote caller, and a write without token/nonce is refused. A nonce is
+   * one-shot, so every write asks for a fresh handshake, exactly like the panel does. */
+  const headers = method === 'GET' ? {} : await freshAuthHeaders()
+  await handler({
+    url: path,
+    method,
+    on: () => {},
+    ...init,
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { ...headers, ...(init.headers ?? {}) },
+  }, res)
   return JSON.parse(chunks.join(''))
+}
+
+/** token + one-time nonce straight from the handshake route (the panel's first call). */
+async function freshAuthHeaders() {
+  const chunks = []
+  const handler = routes.get('/dsh-rescue/handshake.json')
+  assert.ok(handler, 'handshake route must be registered')
+  await handler({ url: '/handshake.json', method: 'GET', on: () => {}, socket: { remoteAddress: '127.0.0.1' }, headers: {} }, {
+    writeHead() {}, end(body) { chunks.push(body ?? '') },
+  })
+  const handshake = JSON.parse(chunks.join(''))
+  assert.equal(handshake.ok, true, 'handshake must answer')
+  return {
+    'content-type': 'application/json',
+    'x-rescue-token': handshake.token,
+    'x-rescue-nonce': handshake.nonce,
+  }
 }
 
 // 1) diagnose.json answers and carries the real shape.
@@ -149,13 +178,16 @@ const cfgRead = await resFor('/config.json')
 assert.equal(cfgRead.ok, true, 'GET /config.json must answer')
 assert.ok(cfgRead.config && cfgRead.config.cookies, 'config.json must carry the cookie policy')
 
-const cleaned = await resFor('/cookies/clean.json', makeBody({ keepNewest: 0, dryRun: true }))
-assert.equal(cleaned.ok, true, 'cookies/clean.json must answer (dry-run)')
+// 0.6.0: the panel may not rewrite a cookie jar the host is holding open (review S2). The route
+// now answers 409 with a *preview* taken on a throwaway copy, plus the CLI command to run.
+const cleaned = await resFor('/cookies/clean.json', makeBody({ keepNewest: 0 }))
+assert.equal(cleaned.applied, false, 'the panel must never write the live jar')
+assert.equal(typeof cleaned.reason, 'string', 'a blocked clean must say why')
+assert.equal(typeof cleaned.command, 'string', 'a blocked clean must hand over the CLI command')
 // The seeded jar holds 60 dsh-auth tokens. If the empty partition jar were picked instead — the
-// exact 0.5.0 masking bug — these would all read zero and the level would be `ok`.
-assert.equal(cleaned.result?.before, TOKENS, 'the seeded jar must be the one measured')
-assert.equal(cleaned.result?.dryRun, true, 'dry-run must not touch the database')
-assert.equal(cleaned.result?.removed ?? 0, 0, 'dry-run removes nothing')
+// exact 0.5.0 masking bug — the preview would read zero.
+assert.equal(cleaned.preview?.before, TOKENS, 'the seeded jar must be the one measured')
+assert.equal(cleaned.preview?.wouldRemove ?? 0, TOKENS, 'the preview must count what the CLI would remove')
 
 // The masking fix, through the measurement path: the worst jar must be the seeded one
 // (60 tokens, broken), not the empty partition jar that also exists in this fixture.
@@ -166,8 +198,9 @@ assert.equal(jar.level, 'broken', '60 tokens must measure as a real problem')
 
 // 0.5.3 additions: the settings page needs the desktop-entry and preflight endpoints.
 const desktopEntry = await resFor('/desktop-entry.json', makeBody({}))
-assert.equal(desktopEntry.ok, true, '/desktop-entry.json must answer')
-assert.ok(desktopEntry.path || desktopEntry.reason, 'desktop-entry reports a path or a reason')
+// Either it created the entry (path) or it refused for an environmental reason (non-Windows
+// desktop folder, metacharacter path...). Both are answers; what must not happen is a crash.
+assert.ok(desktopEntry.path || desktopEntry.reason || desktopEntry.error, 'desktop-entry reports a path or a reason')
 
 const pre = await resFor('/preflight.json', makeBody({}))
 assert.equal(pre.ok, true, '/preflight.json must answer')

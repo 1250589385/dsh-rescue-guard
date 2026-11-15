@@ -15,7 +15,7 @@
  * Usage is printed by `dsh-rescue help`.
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -54,6 +54,14 @@ dsh-rescue —— DSH 启动救援工具（不依赖 DSH 本身，起不来时�
   dsh-rescue cookies --policy          查看当前自动清理策略（与设置面板同一份文件）
   dsh-rescue cookies --auto on|off     打开/关闭自动清理
   dsh-rescue cookies --keep-set N      持久化「保留最新 N 条」
+  dsh-rescue preset                   体检「默认预设是否悬空」+ 哪些会话引用了它
+  dsh-rescue preset --fix             把 patch 里悬空的 selectedDefault 改回内置预设
+  dsh-rescue preset --rewrite-sessions  把会话头里缺失的预设改写成目标（需先退出 DSH）
+  dsh-rescue preset --fix --rewrite-sessions   体检 + 两步一起修（推荐）
+  dsh-rescue preset --to <id>         指定改写到哪个预设（默认取 config 的 preset.fallback）
+  dsh-rescue preset --guard on|off    开/关「悬空时自动回退」（默认关）
+  dsh-rescue preset --fallback <id>   持久化回退目标（默认 ptc）
+  dsh-rescue preset --dry-run         只报告会改什么，不落盘
   dsh-rescue scan                     只跑启动前静态预检
   dsh-rescue safe-mode status         看安全模式是否布防
   dsh-rescue safe-mode on [--reason T] 布防：下次启动只加载官方 bundle
@@ -92,6 +100,12 @@ function parseArgs(argv) {
     else if (arg === '--reason') take(arg, 'reason')
     else if (arg === '--limit') take(arg, 'limit')
     else if (arg === '--crash-dir') { const value = argv[i + 1]; if (!value) throw new Error('--crash-dir 需要一个值'); flags.crashDirs.push(value); i += 1 }
+    else if (arg === '--to') take(arg, 'to')
+    else if (arg === '--guard') take(arg, 'guard')
+    else if (arg === '--fallback') take(arg, 'fallback')
+    else if (arg === '--fix') flags.fix = true
+    else if (arg === '--rewrite-sessions') flags.rewriteSessions = true
+    else if (arg === '--dry-run') flags.dryRun = true
     else if (arg === '--json') flags.json = true
     else if (arg === '--help' || arg === '-h') flags.help = true
     else flags.rest.push(arg)
@@ -130,7 +144,7 @@ const bundlesOf = (manifest) => {
 }
 
 /** Ordered, cause-keyed advice. The order is what makes the output actionable. */
-function advise({ crashes, scan, safe, manifestError }) {
+function advise({ crashes, scan, safe, manifestError, preset }) {
   const tips = []
   const by = summarize(crashes).byCause
 
@@ -194,6 +208,19 @@ function advise({ crashes, scan, safe, manifestError }) {
   if (by.renderer_dead) {
     tips.push({ level: 'warn', text: '有渲染进程被杀（killed）的记录，通常是内存不足或被外部结束，与本插件无关，可查系统事件日志' })
   }
+  if (preset?.needsFix) {
+    const pointer = preset.pointer?.effective
+    const count = preset.sessions?.missing?.length ?? 0
+    const ids = [...new Set(preset.sessions.missing.map((item) => item.agentPreset))].join(' / ')
+    tips.push({
+      level: 'bad',
+      text:
+        (pointer && !preset.pointer.builtin ? `默认预设指向 ${pointer}（非内置）` : '默认预设指针悬空')
+        + (count ? `，另有 ${count} 个会话引用了缺失预设 ${ids}` : '')
+        + ' —— 新会话会报 agent-preset/not-found，老会话无法 resume。'
+        + '先完全退出 DSH，再跑 dsh-rescue preset --fix --rewrite-sessions',
+    })
+  }
   if (safe?.armed) {
     tips.push({ level: 'warn', text: `安全模式已布防（${safe.armedAt ?? '未知时间'}）：下次启动只装官方 bundle。启动成功后本插件会自动还原` })
   }
@@ -201,6 +228,45 @@ function advise({ crashes, scan, safe, manifestError }) {
     tips.push({ level: 'ok', text: '没发现已知的启动风险，也没有历史崩溃记录' })
   }
   return tips
+}
+
+/**
+ * Render the preset check: the patch pointer first, then which sessions would refuse to resume.
+ *
+ * Wording follows what the user actually sees: a new session fails with
+ * `agent-preset/not-found`, an old one says `resume failed`. Saying "dangling pointer" alone
+ * leaves them without a symptom to match.
+ */
+function printPreset(report) {
+  head('预设指针体检')
+  info(`${paint(C.dim, 'patch')} ${report.pointer.file}`)
+  const policy = report.policy ?? { guard: false, fallback: 'ptc' }
+  info(
+    `${paint(C.dim, '预设守护')} ` +
+      (policy.guard
+        ? `开 —— 悬空时自动回退到 ${policy.fallback}（下次启动生效）`
+        : `关 —— 只体检，不改你的配置（回退目标 ${policy.fallback}）`)
+  )
+  const pointer = report.pointer.effective
+  if (pointer === null) {
+    info(paint(C.dim, '没读到 agent-preset-registry 的 default / selectedDefault（结构可能变了）'))
+  } else if (report.pointer.builtin) {
+    ok(`默认预设 ${pointer}（内置，永远可用）`)
+  } else {
+    bad(`默认预设 ${pointer} 不是内置预设（${report.builtin.join(' / ')}）`)
+    info(paint(C.dim, '  它由某个插件在运行时注册：那个插件被禁用或卸载，这个 id 就悬空了'))
+  }
+  const sessions = report.sessions
+  info(`会话：扫描 ${sessions.scanned}/${sessions.total} 个` + (sessions.unreadable ? `，${sessions.unreadable} 个读不了（过大或损坏）` : ''))
+  const missingIds = Object.keys(sessions.byPreset).filter((id) => !report.builtin.includes(id))
+  if (missingIds.length === 0) {
+    ok('没有会话引用内置集合之外的预设')
+  } else {
+    for (const id of missingIds) bad(`${id} × ${sessions.byPreset[id]} 个会话 —— 这些会话现在 resume 会失败`)
+    info(paint(C.dim, '  改写逐帧校验：帧数不变 / 每帧可解 / 未命中帧逐字节相等 / 残留为 0'))
+    info(paint(C.dim, '  每个文件先备份到 ~/.dsh/backups/preset-<时间>/'))
+  }
+  if (!report.needsFix) ok('无需修复')
 }
 
 function printCrashes(crashes) {
@@ -332,7 +398,7 @@ function printScan(scan) {
  * @param opts - `{ flags, rest, json }`.
  * @returns Process exit code.
  */
-async function runCookies({ flags, rest, json }) {
+async function runCookies({ flags, rest, json, home }) {
   const fromBackup = rest.includes('--from-backup') || flags.cookiesFromBackup === true
   const prune = rest.includes('--prune') || flags.cookiesPrune === true
   const dryRun = rest.includes('--dry-run') || flags.cookiesDryRun === true
@@ -353,7 +419,7 @@ async function runCookies({ flags, rest, json }) {
   // from the stored policy whether to act. Exit code 0 always (a cleaning failure must not stop
   // an unrelated launcher), the reason goes to stdout.
   if (rest.includes('--auto-run') || flags.cookiesAutoRun) {
-    const config = readConfig()
+    const config = readConfig(home)
     if (config.cookies.autoClean !== true) {
       info('自动清理未开启，跳过。开启：dsh-rescue cookies --auto')
       return 0
@@ -391,7 +457,7 @@ async function runCookies({ flags, rest, json }) {
   if (rest.includes('--policy') || rest.includes('--auto') || rest.includes('--keep-set')) {
     const autoIndex = rest.indexOf('--auto')
     const keepSetIndex = rest.indexOf('--keep-set')
-    let config = readConfig()
+    let config = readConfig(home)
 
     if (autoIndex >= 0) {
       const value = String(rest[autoIndex + 1] ?? '').toLowerCase()
@@ -399,7 +465,7 @@ async function runCookies({ flags, rest, json }) {
         console.error('--auto 需要 on 或 off')
         return 2
       }
-      config = writeConfig({ cookies: { autoClean: value === 'on' } })
+      config = writeConfig({ cookies: { autoClean: value === 'on' } }, home)
       ok(`自动清理：${config.cookies.autoClean ? '已开启' : '已关闭'}`)
     }
     if (keepSetIndex >= 0) {
@@ -408,7 +474,7 @@ async function runCookies({ flags, rest, json }) {
         console.error('--keep-set 需要一个 ≥ 0 的整数')
         return 2
       }
-      config = writeConfig({ cookies: { keepNewest: Math.floor(value) } })
+      config = writeConfig({ cookies: { keepNewest: Math.floor(value) } }, home)
       ok(`保留最新令牌数：${config.cookies.keepNewest}`)
     }
 
@@ -620,7 +686,7 @@ async function main() {
     return 2
   }
 
-  const crashes = readCrashes({ dirs: crashDirs, limit: Number(flags.limit) || 100 })
+  const crashes = readCrashes({ dirs: crashDirs, limit: Number(flags.limit) || 100, home, profileDir: profile })
   const safe = status({ profileDir: profile })
 
   switch (command) {
@@ -651,7 +717,115 @@ async function main() {
     }
 
     case 'cookies': {
-      return await runCookies({ flags, rest, json: Boolean(flags.json) })
+      return await runCookies({ flags, rest, json: Boolean(flags.json), home })
+    }
+
+    case 'preset': {
+      const preset = await import('../lib/preset.js')
+      /* --guard / --fallback only touch the policy file, then exit: they are settings, not a
+       * check, and mixing them with --fix would make "did I just change something?" ambiguous. */
+      if (flags.guard !== undefined || flags.fallback !== undefined) {
+        const patch = { preset: {} }
+        if (flags.guard !== undefined) {
+          if (flags.guard !== 'on' && flags.guard !== 'off') {
+            console.error('--guard 只接受 on 或 off')
+            return 2
+          }
+          patch.preset.guard = flags.guard === 'on'
+        }
+        if (flags.fallback !== undefined) {
+          if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(flags.fallback)) {
+            console.error('--fallback 只接受预设 id（字母数字开头，允许 . _ -）')
+            return 2
+          }
+          patch.preset.fallback = flags.fallback
+        }
+        /* `--home` must reach the settings file too: the CLI's whole point is that it can run for
+         * any profile/home pair, and a test host must never write the real one. */
+        const config = writeConfig(patch, home)
+        if (flags.json) { console.log(JSON.stringify({ ok: true, config }, null, 2)); return 0 }
+        head('预设守护策略')
+        if (config.preset.guard) ok('悬空时自动回退：已开启')
+        else info('悬空时自动回退：关闭（只体检，不改你的配置）')
+        info('回退目标：' + config.preset.fallback)
+        info(paint(C.dim, '与设置面板共用一份文件：' + configPath(home)))
+        return 0
+      }
+      const report = preset.checkPresets({ profileDir: profile, home, limit: Number(flags.limit) || undefined })
+      const config = readConfig(home)
+      const target = flags.to || config.preset.fallback || report.target
+      if (!preset.BUILTIN_PRESETS.includes(target)) {
+        console.error('预设目标必须是内置预设：' + preset.BUILTIN_PRESETS.join(' / '))
+        return 2
+      }
+      const dryRun = flags.dryRun === true
+      const wantsWrite = flags.fix === true || flags.rewriteSessions === true
+
+      if (flags.json && !wantsWrite) {
+        console.log(JSON.stringify(report, null, 2))
+        return 0
+      }
+      if (report.zstd !== true && flags.rewriteSessions === true) {
+        console.error('当前 Node 运行时没有 zstd（需要 22.15+），无法改写会话。可只用 --fix 修指针。')
+        return 2
+      }
+
+      if (!flags.json) printPreset(report)
+
+      if (!wantsWrite) {
+        if (report.needsFix) {
+          console.log('')
+          info(paint(C.dim, '需要修就跑：') + ' ' + paint(C.cyan, report.command))
+        }
+        return report.needsFix ? 1 : 0
+      }
+
+      const outcome = { pointer: null, sessions: [], cache: [], liveDsh: isDshRunning() }
+      if (flags.rewriteSessions === true && outcome.liveDsh && !dryRun) {
+        console.error('DSH 还在运行：会话文件正被宿主打开，改写大概率被覆盖或写坏。')
+        console.error('完全退出 DSH（含托盘图标）后重跑；只想先看会改什么，加 --dry-run。')
+        return 2
+      }
+
+      if (flags.fix === true && report.dangling) {
+        outcome.pointer = preset.fixPresetPointer({ profileDir: profile, to: target, dryRun })
+        if (!dryRun) {
+          if (outcome.pointer.error) bad('指针没改：' + outcome.pointer.error)
+          else if (outcome.pointer.changed) ok(`selectedDefault ${outcome.pointer.from} → ${target}` + (outcome.pointer.backup ? paint(C.dim, '  （备份：' + outcome.pointer.backup + '）') : ''))
+          else info('指针已经是目标值，无需改动')
+        }
+      }
+
+      if (flags.rewriteSessions === true) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        const backupDir = path.join(home, 'backups', 'preset-' + stamp)
+        const groups = new Map()
+        for (const item of report.sessions.missing) {
+          const list = groups.get(item.agentPreset) ?? []
+          list.push(item)
+          groups.set(item.agentPreset, list)
+        }
+        for (const [from, items] of groups) {
+          for (const item of items) {
+            const result = preset.rewriteSessionFile({ file: item.file, from, to: target, dryRun, backupDir })
+            outcome.sessions.push({ file: item.file, from, to: target, ...result })
+            if (!dryRun) {
+              if (result.error) bad(`${path.basename(path.dirname(item.file))}: ${result.error}`)
+              else ok(`${path.basename(path.dirname(item.file))}: ${from} → ${target}（${result.rewritten} 帧）`)
+            }
+          }
+          const cache = preset.rewriteProjectionCache({ home, from, to: target, dryRun })
+          outcome.cache.push({ from, to: target, ...cache })
+          if (!dryRun && cache.changed > 0) ok(`投影缓存 ${cache.changed} 个文件：${from} → ${target}`)
+        }
+      }
+
+      if (flags.json) { console.log(JSON.stringify({ report, outcome }, null, 2)); return 0 }
+      if (dryRun) { console.log(''); warn('--dry-run：以上只报告，没有写任何文件') ; return 0 }
+      if ((outcome.sessions.some((s) => s.error) || (outcome.pointer && outcome.pointer.error))) return 1
+      console.log('')
+      ok('修完了：完全退出 DSH 再启动，新会话与老会话都应恢复正常')
+      return 0
     }
 
     case 'scan': {
@@ -665,6 +839,10 @@ async function main() {
       const { manifest, error } = readProfileManifest(profile)
       const scan = scanProfile({ profileDir: profile, homeDir: home })
       const boot = readBoot(profile)
+      /* 预设体检 deliberately runs here: a dangling preset is the one boot-adjacent breakage
+       * that leaves no crash log at all — the host starts fine, then refuses every session. */
+      const presetReport = await import('../lib/preset.js').then((module) =>
+        module.checkPresets({ profileDir: profile, home, limit: 200 }))
       if (flags.json) {
         console.log(JSON.stringify({
           profile, home, crashDirs,
@@ -673,6 +851,7 @@ async function main() {
           bundleCount: bundlesOf(manifest).length,
           boot: boot ?? null,
           lastBootFailed: Boolean(boot?.pending),
+          preset: presetReport,
         }, null, 2))
         return 0
       }
@@ -684,7 +863,8 @@ async function main() {
       else ok(`上次启动正常（${boot.okAt ?? boot.at}）`)
       printCrashes(crashes)
       printScan(scan)
-      printAdvice(advise({ crashes, scan, safe, manifestError: error }))
+      printPreset(presetReport)
+      printAdvice(advise({ crashes, scan, safe, manifestError: error, preset: presetReport }))
       console.log()
       return 0
     }
@@ -782,10 +962,10 @@ async function main() {
         manifest.dsh ??= {}
         manifest.dsh.profile ??= {}
         manifest.dsh.profile.bundles = next
-        const file = path.join(profile, 'package.json')
-        const tmp = `${file}.dsh-rescue.tmp`
-        writeFileSync(tmp, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
-        renameSync(tmp, file)
+        /* Same shared writer as the Host half: unique tmp + rename retry (Windows AV holds
+         * the manifest for a few ms), and a failed rename keeps the tmp as evidence. */
+        const { atomicWriteFile } = await import('../lib/paths.js')
+        atomicWriteFile(path.join(profile, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
       })
       head(command === 'disable' ? '已移出启动列表' : '已加回启动列表')
       ok(`${target}（快照 ${before.id} 可回滚）`)

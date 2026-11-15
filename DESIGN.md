@@ -87,7 +87,9 @@ export function restoreSnapshot({ profileDir, id }) -> { restored: [..], skipped
 
 /package.json`、`pnpm-workspace.yaml`、`rules.yaml`（存在才备）
 - 目录：`/.rescue/snapshots//`
-- \*\*原子写\*\*：先写 `.tmp` 再 rename
+- \*\*原子写\*\*：唯一 tmp（pid+随机+计数）→ rename（EPERM/EACCES/EBUSY 退避重试）；
+  失败时保留 tmp 并在错误里给出 `.tmpPath`。实现只有一份：`lib/paths.js` 的
+  `atomicWriteFile` / `atomicWriteFileAsync`（异步写走模块级串行队列）
 - 只保留最近 `keep` 份
 - 回滚前\*\*先自动快照当前状态\*\*（回滚也要可回滚）
 ### `lib/safemode.js` — 安全模式（负责人：keeper）

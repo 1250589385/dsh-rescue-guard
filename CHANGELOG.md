@@ -5,6 +5,143 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-11-15
+
+两件事：**预设悬空**（那个没有崩溃日志、但每个会话都开不了的故障）有了体检与离线修复；
+外部代码审查里的 4 项严重 / 11 项中 / 4 项低全部收口，外加三项「直接击穿功能」的缺陷。
+
+### 新增
+
+- **预设体检与修复**（`lib/preset.js` + `dsh-rescue preset`）：
+  `cordis.patch.yml` 的 `selectedDefault` 可以指向一个**由插件在运行时注册**的预设；插件一被禁用，
+  指针就悬空，新会话报 `agent-preset/not-found`、老会话 `resume failed`——而宿主不崩，没有崩溃日志。
+  三处一起查、一起修：
+  ```
+  dsh-rescue preset                                       只体检
+  dsh-rescue preset --dry-run --fix --rewrite-sessions   看会改什么
+  dsh-rescue preset --fix --rewrite-sessions             真修（需先完全退出 DSH）
+  ```
+  - 指针：只改 `selectedDefault` 那一行，注释 / `default:` / 其它块原样保留（有测试锁）。
+  - 会话：v4 多帧 zstd 逐帧处理，只重压含 `"agentPreset":"<旧 id>"` 的帧，其余帧字节原样保留；
+    落盘前四重校验（帧数不变 / 每帧可解 / 未命中帧逐字节相等 / 残留为 0）。
+  - 投影缓存 `storages/session_projcache/sessions/*.json` 同步改写。
+  - 每文件先备份到 `~/.dsh/backups/preset-<时间戳>/`；DSH 在跑时**拒绝**改写会话（只允许 --dry-run）。
+- **预设守护是开关，默认关**：设置 → 启动救援 → 预设卡片里「悬空时自动回退」+「回退目标」下拉。
+  关（默认）时只体检、不改配置——用户可能正是要用某个插件提供的预设。开着时启动发现悬空，
+  才把 patch 的 `selectedDefault` 改成所选目标（先备份，下次启动生效）。回退目标列表来自宿主
+  注册表（含插件提供的预设），默认 `ptc`；与 CLI 共用 `config.json` 的 `preset.{guard,fallback}`，
+  CLI 等价写法 `dsh-rescue preset --guard on --fallback standard`。
+- **运行时预设守卫**（`index.js`）：启动 3 秒后对照 `agentPresets.list()` 与实际默认 id，
+  悬空就写 `.rescue/preset-state.json` 并在启动日志里点名 + 给出 CLI 命令。**只诊断不代注册**：
+  用空组合别名会让会话「能打开但工具全没了」，比报错更难查。
+- **更新前检查**新增一条规则：默认预设不是内置四个（`standard/ptc/minimal/cordis`）时警告。
+- **面板新增「预设」卡片**（设置 → 启动救援）：指针状态、哪些会话引用了缺失预设、
+  可复制的修复命令；加载失败只降级成一行灰字 + 气泡，不会整块消失。
+- `/rescue` 命令输出加入预设体检结果。
+
+### 安全（审查 S1 / S2 / S3 / S5 / S6 / S14 / S15 / L4）
+
+- **S1 路由鉴权**（`lib/route-auth.js`）：所有 `/dsh-rescue/*` 写请求三层防线——
+  只认回环地址（`127.0.0.1`/`::1`）、同源校验（缺失 Origin 放行，Electron 同源不保证带）、
+  进程内 token（`<profile>/.rescue/route-token.txt`，0600 / icacls）。
+  高危动作（回滚快照、安全模式 apply/off、装守护、创建桌面入口、清 cookie、写配置）
+  再加**一次性 nonce**：`GET /handshake.json` 下发，5 分钟过期、用过即废。面板已内置握手。
+- **S2 cookie 清理只写副本**：面板不再就地改写 Chromium 独占的库；路由返回 409 + 预览 +
+  可复制的 CLI 命令，原库一字未动（`--force` 不再能绕过写保护）。
+- **S3 明文备份**：随机后缀、显式收紧权限、只保留最近 3 份、临时副本独占目录 + 退出清理；
+  stdout 不再打印完整路径。
+- **S5 批处理脚本**：`%~dp0` 自检定位、关闭 delayed expansion、拒绝含令符/UNC 的路径
+  （`isSafeBatchPath`），`installDesktopEntry` 校验 desktop/pluginDir。
+- **S6 预检边界**：npm 包名白名单（拒 `..` 与分隔符）、文件数/字节/单文件上限、
+  `lstat` 不跟随 symlink/junction、去重改 `Set`。
+- **S14 脱敏**（`lib/redact.js`）：崩溃 errorLine 里的家目录/用户名/profile 路径替换成
+  `<home>` / `<profile>`；`path`（修复动作要用）保持原样。路由错误不再外泄绝对路径。
+- **S15 client-errors**：单条 ≤2000 字符、最多 20 条、去控制字符、总量上限，
+  落 `.rescue/client-errors.jsonl`（+ 旧 txt 镜像）。
+- **L4 状态码**：错误用 4xx/5xx（401/403/405/409/413/400），不再一律 200；
+  客户端保留 4xx 响应体里的原因（`locked`、`nonce-expired`…）。
+
+### 健壮性 / 性能（S7 / S9 / S10 / S11 / S13 / L1 / L3）
+
+- **S7 原子写收敛成一份**（`lib/paths.js`）：唯一 tmp（pid + 随机 + 计数）→ rename
+  （EPERM/EACCES/EBUSY 退避重试）→ 失败保留 tmp 并在错误里给 `.tmpPath`；
+  异步写走模块级串行队列（`atomicWriteFileAsync` / `drainAtomicWrites`）。
+  snapshot / safemode / config / watcher / fingerprint / CLI / preset 全部改用它。
+- **S9 崩溃日志有界读取**：先按 mtime 取最近 N 个再读；单文件 2MB 上限、超限只回 meta；
+  0 字节日志单独标记（说明崩溃记录器自己死了）；`sinceMtime` 让 watcher 只解析新文件。
+- **S10**：`/diagnose.json` 的 watcher 状态只读一次；preflight 复用扫描缓存。
+- **S11**：cookie 体积改 SQL 侧聚合（不再把明文令牌全量取回 JS）；VACUUM 按需。
+- **S13**：崩溃分组 `useMemo`、时间串缓存、列表项 `React.memo`、各列表 slice 上限 + 「去 CLI 看完整」。
+- **L1**：报告路径白名单（`<profile>/.rescue/` 且 `.txt`）+ `noopener,noreferrer`。
+- **L3**：定时器句柄统一登记/清理、两份错误上报改走带超时的请求、不再静默吞错。
+
+### 测试
+
+- `test/regression.mjs`：**142 项**（54 → 70 → 134 → 142）。新增块覆盖预设悬空（11 项）、
+  路由鉴权/握手 nonce 契约/只写副本/client-errors 约束（30+ 项）、原子写、崩溃日志有界读取、脱敏。
+- `test/client-section.test.mjs`：**24 项**（内嵌面板不吞滚轮、气泡栈、预设卡片、S13/L1/L3 源码锁）。
+- `node --test`：77 项中 76 通过；唯一失败是 `scan.test.mjs` 的「真实 profile `/rules`」用例，
+  用未修改的 0.5.3 备份跑同样失败（当前 profile 的 `dsh-purge` 未启用且已打过补丁），属既有环境问题。
+
+### 升级注意
+
+- 面板的**写操作**现在会先 `GET /handshake.json` 拿 token + nonce（客户端已内置，无需操作）；
+  `index.js` / `lib/routes.js` 改动**必须完整重启宿主**才生效（client.js 刷新页面即可）。
+- 「立即清理 Cookie」按钮在面板里**只做预览并给出 CLI 命令**：DSH 正在运行时改写 cookie 库
+  本来就会被 Chromium 覆盖或写坏。
+
+## [0.5.4] - 2026-11-15
+
+针对 2026-11-15 的实地反馈与一次外部代码审查（4 严重 / 11 中 / 4 低 + 3 项「直接击穿功能」）。
+
+### 修复（实地反馈）
+
+- **设置页中段滚不动**：内嵌面板沿用了浮动面板的 `.drg-body{overflow-y:auto;overscroll-behavior:contain}`。
+  `contain` 让一个「没有东西可滚」的盒子也吞掉滚轮，宿主页面在它背后不再滚动。
+  内嵌模式改为普通内容（`.drg-panel-embedded .drg-body{overflow:visible;overscroll-behavior:auto}`），
+  滚动交还宿主页面。
+- **错误/结果只出现在页面底部一行**：新增气泡通知（Toast）。
+  `showToast()` 挂 `document.body`，不依赖 React 树与宿主 slot；容器 `pointer-events:none`、
+  条目 `auto`，最多堆 3 条；成功 2.4s、警告 4s、错误 6s 自动消失，可手动关闭。
+  面板的 `flash()`、设置页的保存 / 立即清理 / 创建桌面入口 / 更新前检查全部改走气泡；
+  错误另外保留底部状态行，漏看气泡时仍可回读。
+- **重挂载后面板卡在初始态**：`mountedRef` 只在卸载时置 false，重新注入或 StrictMode 二次挂载
+  后所有请求提前 return。改为挂载时复位。
+- **写操作可并发**：安全模式 / 快照回滚 / 守护安装现在由 `writeLock` 串行化，且刷新完成前
+  按钮不解除禁用（原来 `setBusy(false)` 早于尾部 `load()`）。
+- **取数竞态**：`load()` 带递增序号，慢的旧响应不再覆盖新报告。
+- **设置页取数循环**：`useTranslate` 的兜底函数原来每次渲染新建，使 `load` 依赖恒变、
+  `useEffect` 反复发 GET。兜底函数提为模块级 `identityT`，加载器改读 `tRef`、依赖数组清空。
+- **复制按钮定时器**：改为 `copyTimer` 句柄，卸载时清理。
+
+### 修复（审查确认「直接击穿功能」的三项）
+
+- **崩溃守护永远拿不到锁**（`bin/dsh-rescue-watch.mjs`）：用到的 `WATCH_INTERVAL_MS` 只在
+  `lib/watcher.js` 导出，本文件从未 import → `ReferenceError` → 被 `catch { return null }`
+  吞掉，`acquireLock` 恒为 null，守护起来即退。改为 import 该常量；锁改用
+  `openSync(file,'wx')`（O_CREAT|O_EXCL）原子创建，EEXIST 时按 mtime 判陈旧再重试；
+  fd 写入后 `closeSync`；守护每 15s `utimesSync` 刷新锁 mtime（心跳，unref），
+  否则 60s 后自己会被「陈旧」规则抢走锁，面板的 running 判定也永远为 false。
+  入口加 `isEntryPoint()` 守卫，测试可直接 import `acquireLock` 而不拉起常驻进程。
+- **守护进程活 0 秒**（`lib/watcher.js`）：debounce、`fs.watch({persistent:false})`、
+  兜底轮询全都 `unref()`，`main()` 返回后事件循环为空。现在 10 分钟兜底轮询是唯一
+  **referenced** 句柄（不引入忙轮询），`stop()` 显式清理；另加 `keepAlive:false` 供探针用。
+- **安装期「是否创建救援台」弹窗永不出现**（`lib/desktop-offer.js`）：`buildPromptScript()`
+  的结果赋给 `dialogScript` 后从未使用，`spawn` 的 `-Command` 传的是
+  `bin/dsh-rescue.mjs` 的**路径字符串** —— PowerShell 去运行一个文件名，弹窗不出现；
+  路径含 `;` / 换行时即为命令注入面。改为 `-EncodedCommand`（UTF-16LE base64），
+  脚本以**数据**传递；`psString` 转义保留，`encodeCommand()` / `buildPromptScript()` 导出以便断言。
+
+### 测试
+
+- `test/client-section.test.mjs` 新增 6 条源码锁：内嵌面板不得成为滚动容器、气泡栈存在且
+  不挡点击、`flash` 走气泡、`mountedRef` 挂载复位、写操作串行、`t` 兜底稳定。
+- `test/regression.mjs` 新增 16 项（54 → **70**）：锁的原子创建 / 陈旧抢占 / release、
+  守护子进程存活 >1.5s（旧代码 0s）、`-EncodedCommand` 载荷解码后是脚本而非文件路径。
+- `test/watcher.test.mjs` 新增「常驻 >1s」「stop() 后进程能退出」两条；两条既有用例的
+  日志 mtime 锚点改为相对值（本卷 mtime 粒度约 15.6ms，紧随其后的写入可能取到相等时间戳，
+  是既有 flake，断言未削弱）。
+
 ## [0.5.0] - 2026-11-10
 
 Cookie 自动清理策略现在**可配置、可调试、两处入口共用一份真源**。

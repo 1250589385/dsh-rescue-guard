@@ -42,6 +42,7 @@ window.__ModuleLoader__.load({
     const useEffect = React.useEffect;
     const useRef = React.useRef;
     const useCallback = React.useCallback;
+    const useMemo = React.useMemo;
     const useSyncExternalStore = React.useSyncExternalStore;
 
     const NS = 'dsh.rescueGuard';
@@ -52,9 +53,12 @@ window.__ModuleLoader__.load({
     const SAFE_MODE_URL = PREFIX + '/safe-mode.json';
     const WATCH_URL = PREFIX + '/watch.json';
     const CONFIG_URL = PREFIX + '/config.json';
+    const PRESET_URL = PREFIX + '/preset.json';
+    const CLIENT_ERRORS_URL = PREFIX + '/client-errors.json';
     const COOKIE_CLEAN_URL = PREFIX + '/cookies/clean.json';
     const DESKTOP_ENTRY_URL = PREFIX + '/desktop-entry.json';
     const PREFLIGHT_URL = PREFIX + '/preflight.json';
+    const HANDSHAKE_URL = PREFIX + '/handshake.json';
     /* The rescue command line is supplied by the Host in `diagnose.json`, because only it
      * knows where the plugin was installed. This is just the fallback shown before the first
      * successful fetch. */
@@ -67,6 +71,11 @@ window.__ModuleLoader__.load({
     let commandLine = COMMAND_FALLBACK;
     const REQUEST_TIMEOUT_MS = 20000;
     const ACTION_TIMEOUT_MS = 30000;
+    /* Constants shared by the preset card and the list caps (review S13). */
+    const PRESET_FIX_COMMAND = 'dsh-rescue preset --fix --rewrite-sessions';
+    const LIST_CAP = 20;
+    const CRASH_ITEM_CAP = 50;
+    const TIME_CACHE_MAX = 500;
 
     /** The six causes the Host classifies into; the dictionary must cover each. */
     const CAUSES = ['missing_file', 'command_clash', 'web_auth', 'entry_inactive', 'renderer_dead', 'unknown'];
@@ -110,6 +119,24 @@ window.__ModuleLoader__.load({
       settingsPreflightOk: 'Ready to update: no blocking findings.',
       settingsPreflightWarn: '{count} finding(s) worth reviewing before updating:',
       settingsPreflightReport: 'Post-update report: {path}',
+      settingsPresetTitle: 'Agent preset',
+      settingsPresetOk: 'Default preset {id} (built-in)',
+      settingsPresetDangling: 'Default preset {id} is not a built-in preset',
+      settingsPresetDanglingWhy: 'A plugin supplies it. Once that plugin is disabled, new sessions fail with agent-preset/not-found.',
+      settingsPresetMissing: '{n} session(s) reference a missing preset ({ids})',
+      settingsPresetFixHint: 'quit DSH completely first',
+      settingsPresetBuiltinTag: 'built-in',
+      settingsPresetGuard: 'Fall back when the pointer dangles',
+      settingsPresetGuardDesc: 'On: if the default preset no longer exists at start-up, rewrite the profile pointer to the target below (next start). Off by default: diagnostic only — you may deliberately run a plugin-provided preset.',
+      settingsPresetFallback: 'Fallback target',
+      settingsPresetFallbackDesc: 'Only decides where a repair points; it does not change which preset you use now. The list comes from the host registry, so plugin-provided presets appear too.',
+      settingsPresetSaved: 'Preset guard saved',
+      settingsPresetSaveFailed: 'Could not save: {message}',
+      settingsPresetUnknown: 'No default preset is recorded',
+      settingsPresetUnreadable: '{n} session file(s) could not be read and were not checked',
+      settingsPresetLoadFailed: 'Could not read preset status: {message}',
+      reportBlocked: 'Only .txt reports inside the profile .rescue folder can be opened',
+      listMore: 'and {n} more — run the CLI for the full list',
       settingsTitle: 'Startup rescue',
       settingsIntro: 'Cookie auto-clean policy. Stored in ~/.dsh/rescue-guard/config.json so the standalone CLI honours the same values when the app cannot start.',
       settingsAutoClean: 'Clean auth cookies automatically',
@@ -243,6 +270,24 @@ window.__ModuleLoader__.load({
       settingsPreflightOk: '可以升级：未发现阻断项。',
       settingsPreflightWarn: '发现 {count} 个提醒项，升级前建议处理：',
       settingsPreflightReport: '上次更新后体检：{path}',
+      settingsPresetTitle: '预设',
+      settingsPresetOk: '默认预设 {id}（内置）',
+      settingsPresetDangling: '默认预设 {id} 不是内置预设',
+      settingsPresetDanglingWhy: '它由某个插件提供，插件被禁用后新会话会报 agent-preset/not-found。',
+      settingsPresetMissing: '{n} 个会话引用了缺失预设（{ids}）',
+      settingsPresetFixHint: '先完全退出 DSH',
+      settingsPresetBuiltinTag: '内置',
+      settingsPresetGuard: '悬空时自动回退',
+      settingsPresetGuardDesc: '开：启动时发现默认预设不存在，就把 profile 的指针改成下面的目标（下次启动生效）。默认关：只体检、不改你的配置——你可能正是要用某个插件提供的预设。',
+      settingsPresetFallback: '回退目标',
+      settingsPresetFallbackDesc: '只决定“修到哪里”，不改变你现在用哪个预设。列表来自宿主注册表，插件提供的预设也会出现。',
+      settingsPresetSaved: '预设守护已保存',
+      settingsPresetSaveFailed: '保存失败：{message}',
+      settingsPresetUnknown: '未记录默认预设',
+      settingsPresetUnreadable: '有 {n} 个会话文件读不出来，未检查',
+      settingsPresetLoadFailed: '读取预设状态失败：{message}',
+      reportBlocked: '只允许打开 profile 的 .rescue 目录里的 .txt 报告',
+      listMore: '还有 {n} 条，去 CLI 看完整',
       settingsTitle: '启动救援',
       settingsIntro: 'Cookie 自动清理策略。存在 ~/.dsh/rescue-guard/config.json，这样 DSH 起不来时独立 CLI 也能读到同一份设置。',
       settingsAutoClean: '自动清理认证 Cookie',
@@ -404,10 +449,35 @@ window.__ModuleLoader__.load({
       return Number.isFinite(n) ? n : fallback;
     }
 
+    /**
+     * Every one-shot timer in this module goes through these two helpers.
+     *
+     * Review L3: timers used to be fire-and-forget handles, and a copy button that outlived the
+     * panel (or a toast trimmed out of the stack) kept calling back into dead state. Keeping the
+     * handles in one set means "clear it" is always the same call, and a component only needs
+     * to cancel the id it kept.
+     */
+    const timerHandles = new Set();
+
+    function after(ms, fn) {
+      const id = window.setTimeout(() => {
+        timerHandles.delete(id);
+        fn();
+      }, ms);
+      timerHandles.add(id);
+      return id;
+    }
+
+    function cancelTimer(id) {
+      if (id === null || id === undefined) return;
+      window.clearTimeout(id);
+      timerHandles.delete(id);
+    }
+
     /** A route failure in the only shape the UI needs: a human-readable string. */
     async function requestJson(url, options, timeoutMs) {
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
-      const timer = controller === null ? null : window.setTimeout(() => controller.abort(), timeoutMs);
+      const timer = controller === null ? null : after(timeoutMs, () => controller.abort());
       try {
         const init = Object.assign({ cache: 'no-store', redirect: 'error' }, options);
         if (controller !== null) init.signal = controller.signal;
@@ -420,7 +490,10 @@ window.__ModuleLoader__.load({
         } catch (error) {
           body = null;
         }
-        if (!response.ok) return { ok: false, error: 'HTTP ' + response.status, status: response.status };
+        /* Keep the parsed body on a non-2xx answer: routes now answer 4xx/5xx (review L4), and
+         * several of them carry the actionable reason (`locked`, `nonce-expired`, ...) that the
+         * old "everything is 200" contract used to put in a 200 body. */
+        if (!response.ok) return { ok: false, error: 'HTTP ' + response.status, status: response.status, body };
         if (body === null) {
           return {
             ok: false,
@@ -435,19 +508,93 @@ window.__ModuleLoader__.load({
         const timedOut = controller !== null && controller.signal !== undefined && controller.signal.aborted === true;
         return { ok: false, error: timedOut ? 'timed out after ' + timeoutMs + 'ms' : message, status: 0 };
       } finally {
-        if (timer !== null) window.clearTimeout(timer);
+        cancelTimer(timer);
       }
     }
 
+
+    /**
+     * 写请求要带的鉴权头（审查 S1）。
+     *
+     * 宿主对 `/dsh-rescue/*` 不做鉴权，所以每个写请求必须带进程内 token；高危动作（回滚快照、
+     * 布防/解除安全模式、装守护、写桌面入口、清 cookie、改配置）还要带一次性 nonce。两者都从
+     * `/handshake.json` 取；nonce 用一次即废，所以**每次写都重新握手**。
+     */
+    async function authHeaders() {
+      const handshake = await requestJson(HANDSHAKE_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
+      if (handshake.ok !== true || !isObject(handshake.body)) return null;
+      const token = typeof handshake.body.token === 'string' ? handshake.body.token : '';
+      const nonce = typeof handshake.body.nonce === 'string' ? handshake.body.nonce : '';
+      if (token === '' || nonce === '') return null;
+      return { 'content-type': 'application/json', 'x-rescue-token': token, 'x-rescue-nonce': nonce };
+    }
+
+    /**
+     * POST 一个写端点，自动带上 token + 一次性 nonce。
+     *
+     * 401/403 表示 token 缺失或 nonce 已被用掉（重放、超时、面板开了两份），用一对新的重试一次；
+     * 再失败就把错误原样交给调用方，由它弹出气泡。
+     */
+    async function writeJson(url, payload, timeoutMs) {
+      const attempt = async (headers) => requestJson(url, {
+        method: 'POST',
+        headers: headers === null ? { 'content-type': 'application/json' } : headers,
+        body: JSON.stringify(payload ?? {}),
+      }, timeoutMs);
+      let result = await attempt(await authHeaders());
+      if (result.ok !== true && (result.status === 401 || result.status === 403)) {
+        result = await attempt(await authHeaders());
+      }
+      return result;
+    }
+
+    /**
+     * Report client-side failures to the Host (it writes `.rescue/client-errors.txt`).
+     *
+     * Review L3: this used a bare fetch whose rejection was swallowed, so a non-2xx answer or a route
+     * that never registered vanished without a trace. Going through requestJson gives it the
+     * same timeout and error shape as every other call, and a failed report is logged instead
+     * of swallowed.
+     */
+    async function postClientFailures(lines) {
+      if (!Array.isArray(lines) || lines.length === 0) return;
+      const result = await writeJson(CLIENT_ERRORS_URL, { failures: lines.slice() }, REQUEST_TIMEOUT_MS);
+      if (result.ok !== true) {
+        console.error('[rescue-guard] could not report client failures:', result.error);
+        return;
+      }
+      if (isObject(result.body) && result.body.ok === false) {
+        console.error('[rescue-guard] host rejected client failures:', asString(result.body.error, 'unknown error'));
+      }
+    }
+
+    /**
+     * Timestamp -> display string, memoised by the raw timestamp string.
+     *
+     * Review S13: the panel calls this once per crash row, once per boot line and once per range
+     * on *every* render, and each call used to build a `Date` and run `toLocaleString()`. A crash
+     * history with hundreds of rows spent most of a render in the formatter. The raw string is
+     * the cache key because the Host emits ISO timestamps, so equal strings format equal.
+     */
+    const TIME_CACHE = new Map();
+
     function formatTime(value) {
       if (typeof value !== 'string' || value === '') return '\u2014';
+      const hit = TIME_CACHE.get(value);
+      if (hit !== undefined) return hit;
       const at = Date.parse(value);
-      if (!Number.isFinite(at)) return value;
-      try {
-        return new Date(at).toLocaleString();
-      } catch (error) {
-        return value;
+      let out = value;
+      if (Number.isFinite(at)) {
+        try {
+          out = new Date(at).toLocaleString();
+        } catch (error) {
+          out = value;
+        }
       }
+      /* Bounded so a long-lived renderer never accumulates timestamps forever. */
+      if (TIME_CACHE.size >= TIME_CACHE_MAX) TIME_CACHE.clear();
+      TIME_CACHE.set(value, out);
+      return out;
     }
 
     function formatBytes(value) {
@@ -460,6 +607,28 @@ window.__ModuleLoader__.load({
     /** Dictionary key for a cause id; anything unrecognised falls back to `crash_unknown`. */
     function causeKey(cause) {
       return CAUSES.indexOf(cause) === -1 ? 'crash_unknown' : 'crash_' + cause;
+    }
+
+    /**
+     * Turn a Host-supplied report path into an openable `file://` URL, or null.
+     *
+     * Review L1: the old code concatenated a `file://` URL straight onto whatever path the Host
+     * returned, which turns a compromised or buggy response into "open any local file in the"
+     * renderer". The report the watcher writes is always `<profile>/.rescue/*.txt`, so that is
+     * exactly what is allowed: inside that directory, no `..` segment, `.txt` extension. Anything
+     * else is refused with a toast instead of being opened.
+     */
+    function reportUrl(profileDir, target) {
+      if (typeof profileDir !== 'string' || profileDir === '') return null;
+      if (typeof target !== 'string' || target === '') return null;
+      const normalise = (value) => value.replace(/\\/g, '/').replace(/\/+/g, '/');
+      const base = normalise(profileDir).replace(/\/+$/, '') + '/.rescue/';
+      const file = normalise(target);
+      if (!file.toLowerCase().startsWith(base.toLowerCase())) return null;
+      const rest = file.slice(base.length);
+      if (rest === '' || rest.includes('..')) return null;
+      if (!/\.txt$/i.test(rest)) return null;
+      return 'file://' + target;
     }
 
     /* ------------------------------------------------------------------ styles */
@@ -477,6 +646,13 @@ window.__ModuleLoader__.load({
       '.drg-title{margin:0;font-size:13px;line-height:20px;font-weight:600;color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#e6e6e6))}',
       '.drg-spacer{flex:1;min-width:0}',
       '.drg-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:10px 12px;display:flex;flex-direction:column;gap:10px}',
+      /* Embedded in the settings page the panel must NOT be a scroll container. A child with
+       * overflow-y:auto + overscroll-behavior:contain captures the wheel even when it has
+       * nothing to scroll, and the page behind it stops responding — exactly the
+       * "middle of the page will not scroll" field report (2026-11-15). The host page owns
+       * the scroll; here the panel is plain content. */
+      '.drg-panel-embedded{overflow:visible;max-height:none;box-shadow:none}',
+      '.drg-panel-embedded .drg-body{flex:none;min-height:0;overflow:visible;overscroll-behavior:auto}',
       '.drg-btn{box-sizing:border-box;flex:none;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.14)));border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-bg-layer-2,var(--dsh-surface-alt,rgba(255,255,255,.06)));color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#e6e6e6));font:inherit;font-size:11px;line-height:16px;padding:3px 9px;cursor:pointer}',
       '.drg-btn:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsh-surface-alt,rgba(255,255,255,.1)))}',
       '.drg-btn:disabled{opacity:.45;cursor:default}',
@@ -502,6 +678,8 @@ window.__ModuleLoader__.load({
         '.drg-setting-desc{margin:2px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,var(--dsh-text-secondary,#9aa))}',
         '.drg-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;flex:none}',
         '.drg-input{width:72px;flex:none;padding:4px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.16)));background:transparent;color:inherit;font-size:13px}',
+        /* A preset id is longer than a number: the picker needs room without stretching the row. */
+        '.drg-select{width:auto;min-width:150px;max-width:240px}',
         '.drg-settings-msg{margin-top:10px;color:var(--dsw-alias-state-business-primary,var(--dsh-brand,#4a9eff))}',
         '.drg-flag-bad{color:var(--dsw-alias-state-error-primary,var(--dsh-error,#ff6b6b))}',
         '.drg-flag-warn{color:var(--dsw-alias-state-warning-primary,var(--dsh-warning,#e6a700))}',
@@ -553,6 +731,104 @@ window.__ModuleLoader__.load({
       '.drg-overlay-root{display:contents}',
     ].join('\n');
 
+    /* ---------------------------------------------------------------- toasts */
+
+    /**
+     * 结果气泡（Toast）。
+     *
+     * 面板底部的状态行只表达「刚才那一下」：它随设置分区卸载而消失，滚走的正文也会把它
+     * 挤出视野（2026-11-15 用户反馈：错误通知没有以气泡形式出现）。气泡挂在 document.body
+     * 上，不依赖 React 树和宿主 slot；成功 2.4 秒后自己走开，错误留 6 秒——要读完它再决定
+     * 怎么办。层级按通知选型规范：容器 pointer-events:none，只有条目 auto，不挡下面的按钮。
+     */
+    const TOAST_CLASS = 'drg-toasts';
+    const TOAST_LIFETIME = { ok: 2400, info: 2400, warn: 4000, err: 6000 };
+    const TOAST_CSS = [
+      '.drg-toasts{position:fixed;right:18px;bottom:18px;z-index:2147483001;display:flex;flex-direction:column;gap:8px;align-items:flex-end;max-width:min(360px,calc(100vw - 36px));pointer-events:none}',
+      '.drg-toast{pointer-events:auto;display:flex;align-items:flex-start;gap:8px;padding:8px 10px 8px 12px;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.16)));border-left:3px solid var(--dsw-alias-brand-primary,#4d6bfe);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-overlay,var(--dsh-surface,rgba(20,22,28,.96)));color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#e6e6e6));font:12px/17px ui-sans-serif,system-ui;box-shadow:var(--dsw-elevation-soft,0 8px 24px rgba(0,0,0,.32));animation:drg-toast-in .16s ease-out}',
+      '.drg-toast[data-kind="ok"]{border-left-color:var(--dsw-alias-state-success-primary,var(--dsh-success,#22c55e))}',
+      '.drg-toast[data-kind="err"]{border-left-color:var(--dsw-alias-state-error-primary,var(--dsh-danger,#ec1313))}',
+      '.drg-toast[data-kind="warn"]{border-left-color:var(--dsw-alias-state-warning-primary,var(--dsh-warn,#f0a020))}',
+      '.drg-toast-text{flex:1;min-width:0;overflow-wrap:anywhere}',
+      '.drg-toast-x{flex:none;background:none;border:none;color:var(--dsw-alias-label-tertiary,var(--dsh-text-muted,#8a8f98));font:12px system-ui;cursor:pointer;padding:0 2px}',
+      '@keyframes drg-toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}',
+      '@media (prefers-reduced-motion: reduce){.drg-toast{animation:none}}',
+    ].join('\n');
+
+    /** The single toast stack, created on first use so an untouched page pays nothing. */
+    function toastHost() {
+      let host = document.querySelector('.' + TOAST_CLASS);
+      if (host === null) {
+        host = document.createElement('div');
+        host.className = TOAST_CLASS;
+        host.setAttribute('role', 'status');
+        host.setAttribute('aria-live', 'polite');
+        const style = document.createElement('style');
+        style.setAttribute('data-rescue-guard', 'toasts');
+        style.textContent = TOAST_CSS;
+        document.head.appendChild(style);
+        document.body.appendChild(host);
+      }
+      return host;
+    }
+
+    /** Handles for the auto-dismiss timers, keyed by the bubble they belong to. */
+    const toastTimers = new WeakMap();
+
+    /** Remove one bubble and cancel its timer, whichever path got here first. */
+    function dismissToast(node) {
+      if (node === null || node === undefined) return;
+      const timer = toastTimers.get(node);
+      if (timer !== undefined) {
+        cancelTimer(timer);
+        toastTimers.delete(node);
+      }
+      if (node.parentNode !== null) node.parentNode.removeChild(node);
+    }
+
+    /**
+     * Raise one toast. Never throws: feedback must not be able to take the settings page down,
+     * and a missing document/body (stub hosts in tests) simply gets no bubble.
+     */
+    function showToast(text, kind) {
+      const line = typeof text === 'string' ? text.trim() : '';
+      if (line === '') return;
+      const tone = kind === 'err' || kind === 'warn' || kind === 'info' ? kind : 'ok';
+      try {
+        const host = toastHost();
+        /* Cap the stack at three: a burst of failures must not build a wall over the very
+         * buttons the user needs to retry with. Trimming goes through dismissToast so the
+         * evicted bubble's auto-dismiss timer is cleared too (review L3), instead of firing
+         * later against a detached node. */
+        while (host.children.length >= 3) dismissToast(host.firstElementChild);
+        const node = document.createElement('div');
+        node.className = 'drg-toast';
+        node.dataset.kind = tone;
+        const body = document.createElement('span');
+        body.className = 'drg-toast-text';
+        body.textContent = line;
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'drg-toast-x';
+        close.textContent = '\u2715';
+        close.setAttribute('aria-label', 'Dismiss');
+        node.appendChild(body);
+        node.appendChild(close);
+        host.appendChild(node);
+        const timer = after(TOAST_LIFETIME[tone] ?? 2400, () => dismissToast(node));
+        toastTimers.set(node, timer);
+        close.addEventListener('click', () => dismissToast(node));
+      } catch {
+        /* a missing toast must never break the caller */
+      }
+    }
+
+    /** Identity lookup, hoisted: a fresh arrow per call would change every useCallback that
+     * holds `t` and turn the settings loader into a fetch loop (review L2). */
+    function identityT(key) {
+      return key;
+    }
+
     /* ------------------------------------------------------------------- icons */
 
     /**
@@ -589,7 +865,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------- the launcher */
 
     function useTranslate(props) {
-      return props.t !== undefined && typeof props.t === 'function' ? props.t : (boundT || ((key) => key));
+      return props.t !== undefined && typeof props.t === 'function' ? props.t : (boundT || identityT);
     }
 
     function Launcher(props) {
@@ -614,57 +890,129 @@ window.__ModuleLoader__.load({
 
     /* ---------------------------------------------------------------- the panel */
 
-    /** One cause group: the count row, and its records once expanded. */
-    function CrashGroup(props) {
+    /**
+     * One crash record. Memoised (review S13): crash history is the only genuinely long list in
+     * this panel, and every unrelated state change (busy, pending confirmation, copied) used to
+     * re-render all of its rows. The parent hands it a stable object from the memoised grouping.
+     */
+    const CrashItem = React.memo(function CrashItem(props) {
+      const item = props.item;
+      const t = props.t;
+      const app = asString(item.app, '');
+      const source = asString(item.source, '');
+      const signature = asString(item.signature, '');
+      const file = asString(item.file, '');
+      return h('div', { className: 'drg-item' },
+        h('div', { className: 'drg-item-top' },
+          h('span', { className: 'drg-mono' }, formatTime(asString(item.time, ''))),
+          app === '' ? null : h('span', { className: 'drg-chip' }, app),
+          source === '' ? null : h('span', { className: 'drg-chip' }, source),
+        ),
+        h('div', { className: 'drg-item-sub' },
+          signature !== '' ? signature : t('noItems')),
+        file === ''
+          ? null
+          : h('div', { className: 'drg-item-sub drg-mono' }, file),
+      );
+    });
+
+    /** One pre-flight/scan row; shared by collisions, missing files, shadows and warnings. */
+    const FindingRow = React.memo(function FindingRow(props) {
+      return h('div', { className: 'drg-finding', 'data-tone': props.tone, title: props.title },
+        h('span', { className: props.mono === true ? 'drg-finding-main drg-mono' : 'drg-finding-main' }, props.text),
+      );
+    });
+
+    /** One snapshot row, keeping its inline two-step confirmation (never window.confirm). */
+    const SnapshotRow = React.memo(function SnapshotRow(props) {
+      const { t, id, text, asking, busy, onAsk, onConfirm, onCancel } = props;
+      return h('div', { className: 'drg-finding', 'data-tone': 'warn' },
+        h('div', { className: 'drg-actions' },
+          h('span', { className: 'drg-finding-main drg-mono' }, text),
+          h('span', { className: 'drg-spacer' }),
+          asking
+            ? null
+            : h('button', {
+              type: 'button',
+              className: 'drg-btn drg-btn-danger',
+              disabled: busy || id === '',
+              onClick: () => onAsk(id),
+            }, t('snapRestore')),
+        ),
+        asking
+          ? h('div', { className: 'drg-confirm', style: { marginTop: '5px' } },
+            h('p', { className: 'drg-confirm-title' }, t('snapConfirmTitle')),
+            h('p', { className: 'drg-confirm-body' }, t('snapConfirmBody', { id })),
+            h('div', { className: 'drg-actions' },
+              h('button', {
+                type: 'button',
+                className: 'drg-btn drg-btn-danger',
+                disabled: busy,
+                onClick: () => onConfirm(id),
+              }, busy ? t('working') : t('confirm')),
+              h('button', {
+                type: 'button',
+                className: 'drg-btn',
+                onClick: onCancel,
+              }, t('cancel')),
+            ),
+          )
+          : null,
+      );
+    });
+
+    /**
+     * One cause group: the count row, and its records once expanded.
+     *
+     * Memoised because `items` now comes from the memoised grouping and `onToggle` is the stable
+     * `toggleCause` callback. The expanded list is capped: a history with thousands of rows stays
+     * scrollable, and the panel says how many it left to the CLI instead of silently truncating.
+     */
+    const CrashGroup = React.memo(function CrashGroup(props) {
       const { cause, count, items, t, expanded, onToggle } = props;
+      const canToggle = items.length > 0;
+      const label = t(causeKey(cause));
+      const shown = items.length > CRASH_ITEM_CAP ? items.slice(0, CRASH_ITEM_CAP) : items;
       return h('div', { className: 'drg-group' },
         h('div', {
           className: 'drg-row',
-          'data-clickable': items.length > 0 ? 'true' : 'false',
-          role: items.length > 0 ? 'button' : undefined,
-          tabIndex: items.length > 0 ? 0 : undefined,
-          'aria-expanded': items.length > 0 ? expanded : undefined,
-          title: items.length > 0
-            ? t(causeKey(cause)) + ' · ' + (expanded ? t('crashesHide') : t('crashesShow'))
-            : t(causeKey(cause)),
-          onClick: items.length > 0 ? onToggle : undefined,
-          onKeyDown: items.length > 0
+          'data-clickable': canToggle ? 'true' : 'false',
+          role: canToggle ? 'button' : undefined,
+          tabIndex: canToggle ? 0 : undefined,
+          'aria-expanded': canToggle ? expanded : undefined,
+          title: canToggle
+            ? label + ' \u00b7 ' + (expanded ? t('crashesHide') : t('crashesShow'))
+            : label,
+          onClick: canToggle ? () => onToggle(cause) : undefined,
+          onKeyDown: canToggle
             ? (event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                onToggle();
+                onToggle(cause);
               }
             }
             : undefined,
         },
           h('span', { className: 'drg-count' }, String(count)),
-          h('span', { className: 'drg-cause' }, t(causeKey(cause))),
-          items.length > 0
+          h('span', { className: 'drg-cause' }, label),
+          canToggle
             ? h('span', { className: 'drg-chevron' }, expanded ? '\u25be' : '\u25b8')
             : null,
         ),
-        items.length > 0 && expanded
+        canToggle && expanded
           ? h('div', { className: 'drg-items' },
-            items.map((item, index) => h('div', {
-              key: String(item.time) + '-' + String(index),
-              className: 'drg-item',
-            },
-              h('div', { className: 'drg-item-top' },
-                h('span', { className: 'drg-mono' }, formatTime(item.time)),
-                item.app === '' ? null : h('span', { className: 'drg-chip' }, item.app),
-                item.source === '' ? null : h('span', { className: 'drg-chip' }, item.source),
-              ),
-              h('div', { className: 'drg-item-sub' },
-                item.signature !== '' ? item.signature : t('noItems')),
-              item.file === ''
-                ? null
-                : h('div', { className: 'drg-item-sub drg-mono' }, item.file),
-            )),
+            shown.map((item, index) => h(CrashItem, {
+              key: asString(item.time, '') + '-' + String(index),
+              item,
+              t,
+            })),
+            items.length > shown.length
+              ? h('p', { key: 'more', className: 'drg-hint' }, t('listMore', { n: items.length - shown.length }))
+              : null,
           )
           : null,
       );
-    }
-
+    });
     function Panel(props) {
       const t = useTranslate(props);
       /* Embedded mode renders the same dashboard as a block inside the settings page:
@@ -681,38 +1029,60 @@ window.__ModuleLoader__.load({
       const [copied, setCopied] = useState(false);
       const [safetyId, setSafetyId] = useState('');
       const mountedRef = useRef(true);
-      const statusTimer = useRef(null);
+      /* Serialises mutations: safe mode, snapshot restore and the watcher autostart all
+       * rewrite files under the profile, and two at once can interleave (review S12). */
+      const writeLock = useRef(false);
+      /* Newest request wins; an older response must never overwrite a newer report. */
+      const loadSeq = useRef(0);
+      /* The host may hand a fresh `t` on every render. Keeping the newest one in a ref lets
+       * the loaders keep empty dependency lists instead of refetching in a loop (review L2). */
+      const tRef = useRef(t);
+      tRef.current = t;
+      const copyTimer = useRef(null);
+      /* Filled in from the report each render; the open-report handler needs it without
+       * reading state that is derived later in this function (review L1). */
+      const profileDirRef = useRef('');
 
       const flash = useCallback((kind, text) => {
-        setStatus({ kind, text });
-        if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
-        if (kind === 'ok') {
-          statusTimer.current = window.setTimeout(() => {
-            statusTimer.current = null;
-            setStatus({ kind: 'idle', text: '' });
-          }, 5000);
-        }
+        /* Bubble first (2026-11-15 field report: failures never surfaced as bubbles). Errors
+         * also keep the line at the bottom of the panel, so a missed toast is still readable
+         * in place; successes only need the toast. */
+        showToast(text, kind);
+        setStatus(kind === 'err' ? { kind, text } : { kind: 'idle', text: '' });
       }, []);
 
-      useEffect(() => () => {
-        mountedRef.current = false;
-        if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
+      useEffect(() => {
+        /* Reset on mount, not just clear on unmount: a re-injected slot (and StrictMode's
+         * double mount) reuses the ref object, and without the reset every later request
+         * returned early — the panel froze on its initial state (review S12). */
+        mountedRef.current = true;
+        return () => {
+          mountedRef.current = false;
+          cancelTimer(copyTimer.current);
+          copyTimer.current = null;
+        };
       }, []);
 
       /** One diagnose fetch; also used by the Refresh button. */
       const load = useCallback(async (silent) => {
+        const seq = loadSeq.current + 1;
+        loadSeq.current = seq;
         setBusy(true);
         if (silent !== true) setLoadError('');
         const result = await requestJson(DIAGNOSE_URL, {}, REQUEST_TIMEOUT_MS);
-        if (!mountedRef.current) return;
+        /* Drop a stale response and never touch state after unmount. */
+        if (!mountedRef.current || seq !== loadSeq.current) return;
         setBusy(false);
         if (result.ok !== true) {
           setLoadError(result.error);
+          showToast(tRef.current('loadFailed', { message: result.error }), 'err');
           return;
         }
         const body = result.body;
         if (isObject(body) && body.ok === false) {
-          setLoadError(asString(body.error, 'unknown error'));
+          const message = asString(body.error, 'unknown error');
+          setLoadError(message);
+          showToast(tRef.current('loadFailed', { message }), 'err');
           return;
         }
         setLoadError('');
@@ -759,48 +1129,60 @@ window.__ModuleLoader__.load({
 
       /** POST one action route and fold the result back into the report. */
       const act = useCallback(async (url, payload, onSuccess) => {
+        if (writeLock.current) return;
+        writeLock.current = true;
         setBusy(true);
-        const result = await requestJson(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload),
-        }, ACTION_TIMEOUT_MS);
-        if (!mountedRef.current) return;
-        setBusy(false);
-        if (result.ok !== true) {
-          flash('err', t('actionFailed', { message: result.error }));
-          return;
+        try {
+          const result = await writeJson(url, payload, ACTION_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true) {
+            /* Prefer the server's sentence over "HTTP 400": the 4xx body is where the reason lives. */
+            const reason = isObject(result.body) && typeof result.body.error === 'string' ? result.body.error : result.error;
+            flash('err', tRef.current('actionFailed', { message: reason }));
+            return;
+          }
+          const body = result.body;
+          if (isObject(body) && body.ok === false) {
+            flash('err', tRef.current('actionFailed', { message: asString(body.error, 'unknown error') }));
+            return;
+          }
+          onSuccess(body);
+          /* The report is stale after any mutation; refresh before the buttons unlock, so
+           * they never offer a second click over a half-applied action. */
+          await load(true);
+        } finally {
+          writeLock.current = false;
+          if (mountedRef.current) setBusy(false);
         }
-        const body = result.body;
-        if (isObject(body) && body.ok === false) {
-          flash('err', t('actionFailed', { message: asString(body.error, 'unknown error') }));
-          return;
-        }
-        onSuccess(body);
-        /* The report is stale after any mutation; refresh quietly so the panel agrees
-         * with what just happened on disk. */
-        await load(true);
-      }, [flash, load, t]);
+      }, [flash, load]);
 
       const onRescan = useCallback(async () => {
+        if (writeLock.current) return;
+        writeLock.current = true;
         setBusy(true);
-        const result = await requestJson(SCAN_URL + '?fresh=1', {}, ACTION_TIMEOUT_MS);
-        if (!mountedRef.current) return;
-        setBusy(false);
-        if (result.ok !== true) {
-          flash('err', t('actionFailed', { message: result.error }));
-          return;
+        try {
+          const result = await requestJson(SCAN_URL + '?fresh=1', {}, ACTION_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true) {
+            /* Prefer the server's sentence over "HTTP 400": the 4xx body is where the reason lives. */
+            const reason = isObject(result.body) && typeof result.body.error === 'string' ? result.body.error : result.error;
+            flash('err', tRef.current('actionFailed', { message: reason }));
+            return;
+          }
+          const body = result.body;
+          if (isObject(body) && body.ok === false) {
+            flash('err', tRef.current('actionFailed', { message: asString(body.error, 'unknown error') }));
+            return;
+          }
+          if (isObject(body) && isObject(body.scan)) {
+            setReport((current) => (isObject(current) ? Object.assign({}, current, { scan: body.scan }) : current));
+          }
+          flash('ok', tRef.current('rescanned'));
+        } finally {
+          writeLock.current = false;
+          if (mountedRef.current) setBusy(false);
         }
-        const body = result.body;
-        if (isObject(body) && body.ok === false) {
-          flash('err', t('actionFailed', { message: asString(body.error, 'unknown error') }));
-          return;
-        }
-        if (isObject(body) && isObject(body.scan)) {
-          setReport((current) => (isObject(current) ? Object.assign({}, current, { scan: body.scan }) : current));
-        }
-        flash('ok', t('rescanned'));
-      }, [flash, t]);
+      }, [flash]);
 
       const onArm = useCallback(() => {
         setPending(null);
@@ -875,8 +1257,10 @@ window.__ModuleLoader__.load({
       /**
        * Open the generated crash report in the host's file viewer.
        *
-       * `window.open` on a `file://` URL can be refused outright (no handler, or a blocked
-       * navigation). A refusal must surface as a status line, never as a blank panel.
+       * Review L1: the path comes from a route response, so it is validated first — only a `.txt`
+       * inside `<profile>/.rescue/` may be opened, and the window is opened with
+       * `noopener,noreferrer` so the `file://` document cannot reach back into this renderer.
+       * Anything else is refused with a toast; a refused open must never leave a blank panel.
        */
       const onOpenReport = useCallback(() => {
         const target = reportPath;
@@ -884,11 +1268,15 @@ window.__ModuleLoader__.load({
           flash('err', t('actionFailed', { message: 'no report path' }));
           return;
         }
+        const url = reportUrl(profileDirRef.current, target);
+        if (url === null) {
+          flash('err', t('actionFailed', { message: t('reportBlocked') }));
+          return;
+        }
         try {
-          const win = window.open('file://' + target, '_blank');
-          if (win === null || win === undefined) {
-            flash('err', t('actionFailed', { message: 'the host blocked opening file://' }));
-          }
+          /* `noopener` makes window.open return null by spec, so a null return is NOT treated
+           * as a refusal here; only a thrown error is. */
+          window.open(url, '_blank', 'noopener,noreferrer');
         } catch (error) {
           flash('err', t('actionFailed', { message: error instanceof Error ? error.message : String(error) }));
         }
@@ -899,9 +1287,14 @@ window.__ModuleLoader__.load({
         const done = () => {
           setCopied(true);
           flash('ok', t('cmdCopied'));
-          window.setTimeout(() => {
+          /* Kept in a ref and cleared on unmount (review L3): a timer that outlives the panel
+           * would call setCopied on a dead component. Both copy buttons go through the shared
+           * after/cancelTimer helpers, so the handle is always cleared exactly once. */
+          cancelTimer(copyTimer.current);
+          copyTimer.current = after(2500, () => {
+            copyTimer.current = null;
             if (mountedRef.current) setCopied(false);
-          }, 2500);
+          });
         };
         try {
           if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
@@ -919,6 +1312,14 @@ window.__ModuleLoader__.load({
         setExpanded((current) => Object.assign({}, current, { [cause]: current[cause] !== true }));
       }, []);
 
+      /* Stable callbacks for the memoised snapshot rows; inline arrows would re-render them. */
+      const askRestore = useCallback((id) => {
+        setPending({ kind: 'restore', id });
+      }, []);
+      const cancelPending = useCallback(() => {
+        setPending(null);
+      }, []);
+
       /* ---- derive everything the body renders, tolerating any missing field ---- */
 
       const boot = isObject(report) && isObject(report.boot) ? report.boot : null;
@@ -929,22 +1330,32 @@ window.__ModuleLoader__.load({
       const summary = isObject(crashes) && isObject(crashes.summary) ? crashes.summary : null;
       const crashItems = isObject(crashes) ? asArray(crashes.items) : [];
       const total = isObject(summary) ? asNumber(summary.total, crashItems.length) : crashItems.length;
-      const byCause = isObject(summary) && isObject(summary.byCause) ? summary.byCause : {};
 
-      /* Group the flat item list by cause. The summary already counts them; when the summary
-       * is missing, fall back to counting the items so the panel still shows something true. */
-      const groups = CAUSES.map((cause) => {
-        const own = crashItems.filter((item) => isObject(item) && asString(item.causeId, 'unknown') === cause);
-        const count = asNumber(byCause[cause], own.length);
-        return { cause, count, items: own };
-      }).filter((group) => group.count > 0);
-
-      /* Any cause the summary knows but this build does not list still gets a row. */
-      for (const cause of Object.keys(byCause)) {
-        if (CAUSES.indexOf(cause) !== -1) continue;
-        groups.push({ cause, count: asNumber(byCause[cause], 0), items: [] });
-      }
-      groups.sort((a, b) => b.count - a.count);
+      /*
+       * Group the flat item list by cause.
+       *
+       * Review S13: this used to run six full `filter` passes plus a sort on *every* render of
+       * the panel — and the panel re-renders on every keystroke in its own settings fields, every
+       * busy toggle and every confirmation. It is pure data derived from the report, so it is
+       * memoised on the two objects it actually reads. The summary already counts the rows; when
+       * the summary is missing, fall back to counting the items so the panel still shows something
+       * true. Any cause the summary knows but this build does not list still gets a row.
+       */
+      const groups = useMemo(() => {
+        const byCause = isObject(summary) && isObject(summary.byCause) ? summary.byCause : {};
+        const items = isObject(crashes) ? asArray(crashes.items) : [];
+        const out = CAUSES.map((cause) => {
+          const own = items.filter((item) => isObject(item) && asString(item.causeId, 'unknown') === cause);
+          const count = asNumber(byCause[cause], own.length);
+          return { cause, count, items: own };
+        }).filter((group) => group.count > 0);
+        for (const cause of Object.keys(byCause)) {
+          if (CAUSES.indexOf(cause) !== -1) continue;
+          out.push({ cause, count: asNumber(byCause[cause], 0), items: [] });
+        }
+        out.sort((a, b) => b.count - a.count);
+        return out;
+      }, [crashes, summary]);
 
       const scan = isObject(report) && isObject(report.scan) ? report.scan : null;
       const collisions = isObject(scan) ? asArray(scan.collisions) : [];
@@ -960,6 +1371,8 @@ window.__ModuleLoader__.load({
 
       const snapshots = isObject(report) ? asArray(report.snapshots) : [];
       const profileDir = isObject(report) ? asString(report.profileDir, '') : '';
+      /* The open-report handler runs long after this render; it reads the directory from a ref. */
+      profileDirRef.current = profileDir;
 
       /* What changed since the last boot that worked. The Host builds this diff so the panel and
        * the CLI report identical lines; the panel never recomputes it from raw fingerprints.
@@ -1074,7 +1487,7 @@ window.__ModuleLoader__.load({
             items: group.items,
             t,
             expanded: expanded[group.cause] === true,
-            onToggle: () => toggleCause(group.cause),
+            onToggle: toggleCause,
           }));
         }
         body.push(h('div', { key: 'crashes', className: 'drg-section' }, crashChildren));
@@ -1089,21 +1502,31 @@ window.__ModuleLoader__.load({
           scanChildren.push(h('p', { key: 'counts', className: 'drg-hint' },
             t('scanCounts', { bundles: bundleCount, commands: commandCount })));
 
+          /* Review S13: every finding list is capped at LIST_CAP rows and says how many it left
+           * behind, so a pathological scan cannot turn the settings page into a frozen list and
+           * a truncated list never reads as the whole story. Rows are memoised components. */
+
           /* collisions — the finding that reproduces this machine's real /rules clash */
           scanChildren.push(h('h6', { key: 'ch', className: 'drg-section-title' }, t('collisionsTitle')));
           if (collisions.length === 0) {
             scanChildren.push(h('p', { key: 'ce', className: 'drg-empty' }, t('collisionsEmpty')));
           } else {
             scanChildren.push(h('p', { key: 'chelp', className: 'drg-hint' }, t('collisionsHelp')));
-            for (let index = 0; index < collisions.length; index += 1) {
-              const item = collisions[index];
+            const shownCollisions = collisions.length > LIST_CAP ? collisions.slice(0, LIST_CAP) : collisions;
+            for (let index = 0; index < shownCollisions.length; index += 1) {
+              const item = shownCollisions[index];
               const name = isObject(item) ? asString(item.name, '') : '';
               const plugins = isObject(item) ? asArray(item.plugins).join(', ') : '';
-              scanChildren.push(h('div', {
+              scanChildren.push(h(FindingRow, {
                 key: 'c' + String(index),
-                className: 'drg-finding',
-                'data-tone': 'bad',
-              }, h('span', { className: 'drg-finding-main drg-mono' }, t('collisionLine', { name, plugins }))));
+                tone: 'bad',
+                mono: true,
+                text: t('collisionLine', { name, plugins }),
+              }));
+            }
+            if (collisions.length > shownCollisions.length) {
+              scanChildren.push(h('p', { key: 'c-more', className: 'drg-hint drg-muted' },
+                t('listMore', { n: collisions.length - shownCollisions.length })));
             }
           }
 
@@ -1112,16 +1535,21 @@ window.__ModuleLoader__.load({
           if (missing.length === 0) {
             scanChildren.push(h('p', { key: 'me', className: 'drg-empty' }, t('missingEmpty')));
           } else {
-            for (let index = 0; index < missing.length; index += 1) {
-              const item = missing[index];
+            const shownMissing = missing.length > LIST_CAP ? missing.slice(0, LIST_CAP) : missing;
+            for (let index = 0; index < shownMissing.length; index += 1) {
+              const item = shownMissing[index];
               const plugin = isObject(item) ? asString(item.plugin, '') : '';
               const filePath = isObject(item) ? asString(item.path, '') : '';
-              scanChildren.push(h('div', {
+              scanChildren.push(h(FindingRow, {
                 key: 'm' + String(index),
-                className: 'drg-finding',
-                'data-tone': 'bad',
+                tone: 'bad',
                 title: filePath,
-              }, h('span', { className: 'drg-finding-main' }, t('missingLine', { plugin, path: filePath }))));
+                text: t('missingLine', { plugin, path: filePath }),
+              }));
+            }
+            if (missing.length > shownMissing.length) {
+              scanChildren.push(h('p', { key: 'm-more', className: 'drg-hint drg-muted' },
+                t('listMore', { n: missing.length - shownMissing.length })));
             }
           }
 
@@ -1130,28 +1558,39 @@ window.__ModuleLoader__.load({
           if (shadows.length === 0) {
             scanChildren.push(h('p', { key: 'se', className: 'drg-empty' }, t('shadowsEmpty')));
           } else {
-            for (let index = 0; index < shadows.length; index += 1) {
-              const item = shadows[index];
+            const shownShadows = shadows.length > LIST_CAP ? shadows.slice(0, LIST_CAP) : shadows;
+            for (let index = 0; index < shownShadows.length; index += 1) {
+              const item = shownShadows[index];
               const plugin = isObject(item) ? asString(item.plugin, '') : '';
               const shadowPath = isObject(item) ? asString(item.path, '') : '';
               const kind = isObject(item) ? asString(item.kind, '') : '';
-              scanChildren.push(h('div', {
+              scanChildren.push(h(FindingRow, {
                 key: 's' + String(index),
-                className: 'drg-finding',
-                'data-tone': 'warn',
-              }, h('span', { className: 'drg-finding-main drg-mono' }, t('shadowLine', { plugin, path: shadowPath, kind }))));
+                tone: 'warn',
+                mono: true,
+                text: t('shadowLine', { plugin, path: shadowPath, kind }),
+              }));
+            }
+            if (shadows.length > shownShadows.length) {
+              scanChildren.push(h('p', { key: 's-more', className: 'drg-hint drg-muted' },
+                t('listMore', { n: shadows.length - shownShadows.length })));
             }
           }
 
           /* warnings: the heuristic's own hedges */
           if (warnings.length > 0) {
             scanChildren.push(h('h6', { key: 'wh', className: 'drg-section-title' }, t('warningsTitle')));
-            for (let index = 0; index < warnings.length; index += 1) {
-              scanChildren.push(h('div', {
+            const shownWarnings = warnings.length > LIST_CAP ? warnings.slice(0, LIST_CAP) : warnings;
+            for (let index = 0; index < shownWarnings.length; index += 1) {
+              scanChildren.push(h(FindingRow, {
                 key: 'w' + String(index),
-                className: 'drg-finding',
-                'data-tone': 'warn',
-              }, h('span', { className: 'drg-finding-main' }, asString(warnings[index], ''))));
+                tone: 'warn',
+                text: asString(shownWarnings[index], ''),
+              }));
+            }
+            if (warnings.length > shownWarnings.length) {
+              scanChildren.push(h('p', { key: 'w-more', className: 'drg-hint drg-muted' },
+                t('listMore', { n: warnings.length - shownWarnings.length })));
             }
           }
         }
@@ -1181,12 +1620,18 @@ window.__ModuleLoader__.load({
           if (disabledList.length > 0) {
             safeChildren.push(h('p', { key: 'dis', className: 'drg-hint' },
               t('safeDisabled', { n: disabledList.length })));
-            for (let index = 0; index < disabledList.length; index += 1) {
-              safeChildren.push(h('div', {
+            const shownDisabled = disabledList.length > LIST_CAP ? disabledList.slice(0, LIST_CAP) : disabledList;
+            for (let index = 0; index < shownDisabled.length; index += 1) {
+              safeChildren.push(h(FindingRow, {
                 key: 'd' + String(index),
-                className: 'drg-finding',
-                'data-tone': 'warn',
-              }, h('span', { className: 'drg-finding-main drg-mono' }, asString(disabledList[index], ''))));
+                tone: 'warn',
+                mono: true,
+                text: asString(shownDisabled[index], ''),
+              }));
+            }
+            if (disabledList.length > shownDisabled.length) {
+              safeChildren.push(h('p', { key: 'd-more', className: 'drg-hint drg-muted' },
+                t('listMore', { n: disabledList.length - shownDisabled.length })));
             }
           }
         }
@@ -1324,52 +1769,29 @@ window.__ModuleLoader__.load({
         if (snapshots.length === 0) {
           snapChildren.push(h('p', { key: 'none', className: 'drg-empty' }, t('snapEmpty')));
         } else {
-          for (let index = 0; index < snapshots.length; index += 1) {
-            const snap = snapshots[index];
+          const shownSnapshots = snapshots.length > LIST_CAP ? snapshots.slice(0, LIST_CAP) : snapshots;
+          for (let index = 0; index < shownSnapshots.length; index += 1) {
+            const snap = shownSnapshots[index];
             const id = isObject(snap) ? asString(snap.id, '') : '';
-            const isPending = isObject(pending) && pending.kind === 'restore' && pending.id === id;
-            snapChildren.push(h('div', {
+            snapChildren.push(h(SnapshotRow, {
               key: 'snap' + String(index),
-              className: 'drg-finding',
-              'data-tone': 'warn',
-            },
-              h('div', { className: 'drg-actions' },
-                h('span', { className: 'drg-finding-main drg-mono' },
-                  t('snapLine', {
-                    id,
-                    files: isObject(snap) ? asArray(snap.files).length : 0,
-                    bytes: isObject(snap) ? formatBytes(snap.bytes) : formatBytes(0),
-                  })),
-                h('span', { className: 'drg-spacer' }),
-                isPending
-                  ? null
-                  : h('button', {
-                    type: 'button',
-                    className: 'drg-btn drg-btn-danger',
-                    disabled: busy || id === '',
-                    onClick: () => setPending({ kind: 'restore', id }),
-                  }, t('snapRestore')),
-              ),
-              isPending
-                ? h('div', { className: 'drg-confirm', style: { marginTop: '5px' } },
-                  h('p', { className: 'drg-confirm-title' }, t('snapConfirmTitle')),
-                  h('p', { className: 'drg-confirm-body' }, t('snapConfirmBody', { id })),
-                  h('div', { className: 'drg-actions' },
-                    h('button', {
-                      type: 'button',
-                      className: 'drg-btn drg-btn-danger',
-                      disabled: busy,
-                      onClick: () => onRestore(id),
-                    }, busy ? t('working') : t('confirm')),
-                    h('button', {
-                      type: 'button',
-                      className: 'drg-btn',
-                      onClick: () => setPending(null),
-                    }, t('cancel')),
-                  ),
-                )
-                : null,
-            ));
+              id,
+              text: t('snapLine', {
+                id,
+                files: isObject(snap) ? asArray(snap.files).length : 0,
+                bytes: isObject(snap) ? formatBytes(snap.bytes) : formatBytes(0),
+              }),
+              asking: isObject(pending) && pending.kind === 'restore' && pending.id === id,
+              busy,
+              t,
+              onAsk: askRestore,
+              onConfirm: onRestore,
+              onCancel: cancelPending,
+            }));
+          }
+          if (snapshots.length > shownSnapshots.length) {
+            snapChildren.push(h('p', { key: 'snap-more', className: 'drg-hint drg-muted' },
+              t('listMore', { n: snapshots.length - shownSnapshots.length })));
           }
         }
         if (safetyId !== '') {
@@ -1482,6 +1904,133 @@ window.__ModuleLoader__.load({
       return h(Launcher, { t });
     }
 
+    /* ------------------------------------------------------- preset card (预设) */
+
+    /**
+     * 「预设」卡片：默认预设是否还活着、哪些老会话引用了已经不存在的预设，以及那条离线修复命令。
+     *
+     * 数据来自 `GET /dsh-rescue/preset.json`（Host 侧就是 lib/preset.js 的 checkPresets 结果）。
+     * 卡片只负责说清楚三件事：指针是内置/悬空、引用缺失预设的会话数、可复制的 CLI 命令。真正
+     * 的修复必须在 DSH 完全退出后由 CLI 做——会话文件是多帧 zstd，运行期改写会撕裂历史。
+     */
+    function PresetCard(props) {
+      const { t, report, error, busy, copied, onReload, onCopy, onPolicy } = props;
+      const pointer = isObject(report) ? report.pointer : null;
+      const effective = isObject(pointer) ? asString(pointer.effective, '') : '';
+      const builtin = isObject(pointer) && pointer.builtin === true;
+      const dangling = isObject(report) && report.dangling === true;
+      const sessions = isObject(report) && isObject(report.sessions) ? report.sessions : null;
+      const missing = isObject(sessions) ? asArray(sessions.missing) : [];
+      const unreadable = isObject(sessions) ? asNumber(sessions.unreadable, 0) : 0;
+
+      /* Group the missing-session rows by preset id: 'ops-ptc × 3' is what a person can act on;
+       * three absolute session paths are not. */
+      const counts = new Map();
+      for (const item of missing) {
+        const id = isObject(item) ? asString(item.agentPreset, '') : '';
+        if (id === '') continue;
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+      const idSummary = Array.from(counts.entries()).map((entry) => entry[0] + ' × ' + entry[1]).join(', ');
+      const command = isObject(report) ? asString(report.command, PRESET_FIX_COMMAND) : PRESET_FIX_COMMAND;
+      const policy = isObject(report) && isObject(report.policy) ? report.policy : { guard: false, fallback: 'ptc' };
+      const guardOn = policy.guard === true;
+      const fallback = asString(policy.fallback, 'ptc');
+      const available = isObject(report) ? asArray(report.available).filter((row) => isObject(row) && asString(row.id, '') !== '') : [];
+      /* The saved target must always be selectable, even when the registry does not list it right
+       * now (e.g. that plugin is disabled): otherwise the <select> silently shows the first option
+       * and the next "save" would rewrite the user's choice without them touching anything. */
+      const options = available.map((row) => ({ id: asString(row.id, ''), builtin: row.builtin === true }));
+      if (!options.some((row) => row.id === fallback)) options.push({ id: fallback, builtin: false });
+
+      const children = [];
+      children.push(h('div', { key: 'h', className: 'drg-section-title' },
+        h('span', null, t('settingsPresetTitle')),
+        h('span', { className: 'drg-spacer' }),
+        h('button', {
+          type: 'button',
+          className: 'drg-btn',
+          disabled: busy,
+          onClick: onReload,
+        }, busy ? t('refreshing') : t('refresh')),
+      ));
+
+      if (isObject(report)) {
+        if (builtin && effective !== '') {
+          children.push(h('p', { key: 'pointer', className: 'drg-flag drg-ok' },
+            t('settingsPresetOk', { id: effective })));
+        } else if (dangling) {
+          children.push(h('p', { key: 'pointer', className: 'drg-flag drg-flag-bad' },
+            t('settingsPresetDangling', { id: effective === '' ? t('none') : effective })));
+          children.push(h('p', { key: 'why', className: 'drg-hint' }, t('settingsPresetDanglingWhy')));
+        } else {
+          children.push(h('p', { key: 'pointer', className: 'drg-flag drg-dim' }, t('settingsPresetUnknown')));
+        }
+
+        /* The guard is a *choice*, so it is a switch plus a target picker, not a sentence.
+         * Off is the default and stays meaningful: a user may be running ops-ptc on purpose. */
+        children.push(h('div', { key: 'guard', className: 'drg-setting-row' },
+          h('div', { className: 'drg-setting-text' },
+            h('p', { className: 'drg-setting-label' }, t('settingsPresetGuard')),
+            h('p', { className: 'drg-setting-desc' }, t('settingsPresetGuardDesc')),
+          ),
+          h('label', { className: 'drg-switch' },
+            h('input', {
+              type: 'checkbox',
+              role: 'switch',
+              'aria-checked': guardOn ? 'true' : 'false',
+              checked: guardOn,
+              disabled: busy,
+              onChange: (event) => onPolicy({ guard: event.target.checked }),
+            }),
+            h('span', null, guardOn ? t('on') : t('off')),
+          ),
+        ));
+        children.push(h('div', { key: 'fallback', className: 'drg-setting-row' },
+          h('div', { className: 'drg-setting-text' },
+            h('p', { className: 'drg-setting-label' }, t('settingsPresetFallback')),
+            h('p', { className: 'drg-setting-desc' }, t('settingsPresetFallbackDesc')),
+          ),
+          h('select', {
+            className: 'drg-input drg-select',
+            value: fallback,
+            disabled: busy,
+            onChange: (event) => onPolicy({ fallback: event.target.value }),
+          },
+            options.map((row) => h('option', { key: row.id, value: row.id },
+              row.id + (row.builtin ? ' · ' + t('settingsPresetBuiltinTag') : ''))),
+          ),
+        ));
+
+        if (missing.length > 0) {
+          children.push(h('p', { key: 'missing', className: 'drg-flag drg-flag-bad' },
+            t('settingsPresetMissing', { n: missing.length, ids: idSummary })));
+          children.push(h('div', { key: 'cmd', className: 'drg-cmd' },
+            h('span', { className: 'drg-cmd-text', title: command }, command),
+            h('button', {
+              type: 'button',
+              className: 'drg-btn',
+              onClick: onCopy,
+            }, copied ? t('cmdCopied') : t('cmdCopy')),
+            h('span', { className: 'drg-hint' }, t('settingsPresetFixHint')),
+          ));
+        }
+
+        if (unreadable > 0) {
+          children.push(h('p', { key: 'unreadable', className: 'drg-hint' },
+            t('settingsPresetUnreadable', { n: unreadable })));
+        }
+      } else if (error !== '') {
+        /* A failed read must not delete the card: the grey line says what happened, the header
+         * refresh button retries, and the toast (raised by the loader) is what makes it visible. */
+        children.push(h('p', { key: 'failed', className: 'drg-empty' },
+          t('settingsPresetLoadFailed', { message: error })));
+      } else {
+        children.push(h('p', { key: 'loading', className: 'drg-empty' }, t('loading')));
+      }
+
+      return h('div', { className: 'drg-section' }, children);
+    }
     /* -------------------------------------------------- settings section (设置面板) */
 
     /**
@@ -1506,97 +2055,221 @@ window.__ModuleLoader__.load({
       const [preflightBusy, setPreflightBusy] = useState(false);
       const [preflightMessage, setPreflightMessage] = useState('');
       const [preflightFindings, setPreflightFindings] = useState([]);
+      /* 预设卡片：读 `preset.json`（Host 侧 checkPresets 的结果）。加载失败时保留卡片本身，
+       * 只用一行灰字 + 气泡说明——整块消失会让人以为这个功能不存在。 */
+      const [preset, setPreset] = useState(null);
+      const [presetError, setPresetError] = useState('');
+      const [presetBusy, setPresetBusy] = useState(false);
+      const [presetCopied, setPresetCopied] = useState(false);
+      const presetCopyTimer = useRef(null);
+      /* The section is re-created on every visit to 设置; a request that lands after the
+       * user navigated away must not set state on the dead tree. */
+      const mountedRef = useRef(true);
+      /* Host `t` is not referentially stable. Reading it through a ref keeps the loaders'
+       * dependency lists empty; without this the GET below re-ran on every render, which is
+       * review L2's refetch loop. */
+      const tRef = useRef(t);
+      tRef.current = t;
+
+      useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+          mountedRef.current = false;
+          /* Review L3: the preset copy button's reset timer must not fire into a dead tree. */
+          cancelTimer(presetCopyTimer.current);
+          presetCopyTimer.current = null;
+        };
+      }, []);
 
       const load = useCallback(async () => {
         const result = await requestJson(CONFIG_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
-        if (!result.ok) { setMessage(t('settingsLoadFailed', { message: result.error })); return; }
+        if (!mountedRef.current) return;
+        if (result.ok !== true) {
+          setMessage(tRef.current('settingsLoadFailed', { message: result.error }));
+          showToast(tRef.current('settingsLoadFailed', { message: result.error }), 'err');
+          return;
+        }
         setConfig(result.body?.config ?? null);
         setMessage('');
-      }, [t]);
+      }, []);
 
       useEffect(() => { load(); }, [load]);
+
+      /**
+       * 读预设体检结果。依赖列表刻意为空：宿主给的 `t` 引用不稳定，read through `tRef`；
+       * 否则这个 GET 会和上面的 config GET 一样，每次渲染重跑一次（review L2）。
+       */
+      const loadPreset = useCallback(async () => {
+        setPresetBusy(true);
+        try {
+          const result = await requestJson(PRESET_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true) {
+            setPreset(null);
+            setPresetError(result.error);
+            showToast(tRef.current('settingsPresetLoadFailed', { message: result.error }), 'err');
+            return;
+          }
+          const body = result.body;
+          if (isObject(body) && body.ok === false) {
+            const message = asString(body.error, 'unknown error');
+            setPreset(null);
+            setPresetError(message);
+            showToast(tRef.current('settingsPresetLoadFailed', { message }), 'err');
+            return;
+          }
+          setPresetError('');
+          setPreset(isObject(body) ? body : null);
+        } finally {
+          if (mountedRef.current) setPresetBusy(false);
+        }
+      }, []);
+
+      useEffect(() => { loadPreset(); }, [loadPreset]);
+
+      /** Copy the CLI repair command; the button's 'copied' reset goes through cancelTimer. */
+      const copyPresetCommand = useCallback(async () => {
+        const command = isObject(preset) ? asString(preset.command, PRESET_FIX_COMMAND) : PRESET_FIX_COMMAND;
+        try {
+          if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(command);
+            setPresetCopied(true);
+            showToast(tRef.current('cmdCopied'), 'ok');
+            cancelTimer(presetCopyTimer.current);
+            presetCopyTimer.current = after(2500, () => {
+              presetCopyTimer.current = null;
+              if (mountedRef.current) setPresetCopied(false);
+            });
+            return;
+          }
+          throw new Error('clipboard API unavailable');
+        } catch (error) {
+          showToast(tRef.current('cmdCopyFailed', { message: error instanceof Error ? error.message : String(error) }), 'err');
+        }
+      }, [preset]);
+
+      /**
+       * Persist the preset guard policy through the same config file the CLI reads.
+       *
+       * Written with `writeJson` (token + one-shot nonce): a policy write is high-risk on the
+       * route side because it changes what the next start-up will do to the profile.
+       */
+      const savePresetPolicy = useCallback(async (patch) => {
+        setPresetBusy(true);
+        try {
+          const result = await writeJson(CONFIG_URL, { config: { preset: patch } }, REQUEST_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true || result.body?.ok !== true) {
+            const reason = isObject(result.body) && typeof result.body.error === 'string' ? result.body.error : result.error;
+            showToast(tRef.current('settingsPresetSaveFailed', { message: reason ?? '' }), 'err');
+            return;
+          }
+          const next = result.body.config?.preset;
+          setPreset((current) => (isObject(current) ? Object.assign({}, current, { policy: isObject(next) ? next : patch }) : current));
+          showToast(tRef.current('settingsPresetSaved'), 'ok');
+        } finally {
+          if (mountedRef.current) setPresetBusy(false);
+        }
+      }, []);
 
       const save = useCallback(async (patch) => {
         setBusy(true);
         try {
-          const result = await requestJson(CONFIG_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ config: patch }),
-          }, REQUEST_TIMEOUT_MS);
+          const result = await writeJson(CONFIG_URL, { config: patch }, REQUEST_TIMEOUT_MS);
+          if (!mountedRef.current) return;
           if (!result.ok || result.body?.ok !== true) {
-            setMessage(t('settingsSaveFailed', { message: result.body?.error ?? result.error ?? '' }));
+            const failed = tRef.current('settingsSaveFailed', { message: result.body?.error ?? result.error ?? '' });
+            setMessage('');
+            showToast(failed, 'err');
             return;
           }
           setConfig(result.body.config ?? null);
-          setMessage(t('settingsSaved'));
+          setMessage('');
+          showToast(tRef.current('settingsSaved'), 'ok');
         } finally {
-          setBusy(false);
+          if (mountedRef.current) setBusy(false);
         }
-      }, [t]);
+      }, []);
 
       const cleanNow = useCallback(async () => {
         setCleaning(true);
         setMessage('');
         try {
           const keep = config?.cookies?.keepNewest ?? 0;
-          const result = await requestJson(COOKIE_CLEAN_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ keepNewest: keep }),
-          }, ACTION_TIMEOUT_MS);
+          const result = await writeJson(COOKIE_CLEAN_URL, { keepNewest: keep }, ACTION_TIMEOUT_MS);
           const body = result.body ?? {};
+          if (!mountedRef.current) return;
+          const blockedReason = typeof body.reason === 'string' ? body.reason : '';
+          if (blockedReason === 'running' || blockedReason === 'route-writes-copy-only' || body.locked === true) {
+            /* The host cannot rewrite a jar it is holding open (review S2). This is a state, not
+             * a failure of the click: warn and hand over the exact CLI command. */
+            setMessage('');
+            const command = typeof body.command === 'string' ? body.command : 'dsh-rescue cookies --prune';
+            showToast(tRef.current('settingsCleanLocked') + ' · ' + command, 'warn');
+            return;
+          }
           if (body.ok === true) {
-            setMessage(t('settingsCleanDone', { removed: body.result?.removed ?? 0, after: body.result?.after ?? 0 }));
+            setMessage('');
+            showToast(tRef.current('settingsCleanDone', { removed: body.result?.removed ?? 0, after: body.result?.after ?? 0 }), 'ok');
             await load();
-          } else if (body.reason === 'locked') {
-            setMessage(t('settingsCleanLocked'));
           } else {
-            setMessage(t('settingsCleanFailed', { message: body.error ?? result.error ?? '' }));
+            const failed = tRef.current('settingsCleanFailed', { message: body.error ?? result.error ?? '' });
+            setMessage('');
+            showToast(failed, 'err');
           }
         } finally {
-          setCleaning(false);
+          if (mountedRef.current) setCleaning(false);
         }
-      }, [config, load, t]);
+      }, [config, load]);
 
       const createDesktopEntry = useCallback(async () => {
         setDesktopBusy(true);
         setDesktopMessage('');
         try {
-          const result = await requestJson(DESKTOP_ENTRY_URL, { method: 'POST' }, ACTION_TIMEOUT_MS);
+          const result = await writeJson(DESKTOP_ENTRY_URL, {}, ACTION_TIMEOUT_MS);
           const body = result.body ?? {};
+          if (!mountedRef.current) return;
           if (body.ok === true) {
-            setDesktopMessage(t('settingsDesktopDone', { path: body.path ?? '' }));
+            const done = tRef.current('settingsDesktopDone', { path: body.path ?? '' });
+            setDesktopMessage(done);
+            showToast(done, 'ok');
           } else {
-            setDesktopMessage(t('settingsDesktopFailed', { message: body.reason ?? result.error ?? '' }));
+            const failed = tRef.current('settingsDesktopFailed', { message: body.error ?? body.reason ?? result.error ?? '' });
+            setDesktopMessage(failed);
+            showToast(failed, 'err');
           }
         } finally {
-          setDesktopBusy(false);
+          if (mountedRef.current) setDesktopBusy(false);
         }
-      }, [t]);
+      }, []);
 
       const runPreflight = useCallback(async () => {
         setPreflightBusy(true);
         setPreflightMessage('');
         setPreflightFindings([]);
         try {
-          const result = await requestJson(PREFLIGHT_URL, { method: 'POST' }, ACTION_TIMEOUT_MS);
+          const result = await writeJson(PREFLIGHT_URL, {}, ACTION_TIMEOUT_MS);
           const body = result.body ?? {};
+          if (!mountedRef.current) return;
           if (body.ok !== true) {
-            setPreflightMessage(t('settingsPreflightWarn', { count: 0 }) + ' ' + (body.error ?? result.error ?? ''));
+            const failed = tRef.current('settingsPreflightWarn', { count: 0 }) + ' ' + (body.error ?? result.error ?? '');
+            setPreflightMessage(failed);
+            showToast(failed, 'err');
             return;
           }
           const findings = Array.isArray(body.findings) ? body.findings : [];
           setPreflightFindings(findings.map((f) => (typeof f === 'string' ? f : (f?.text ?? String(f)))));
-          if (body.okToUpdate === true) {
-            setPreflightMessage(t('settingsPreflightOk'));
-          } else {
-            setPreflightMessage(t('settingsPreflightWarn', { count: findings.length }));
-          }
+          /* The findings list stays inline (it is content to read); the bubble carries only
+           * the verdict, which is what a person needs at a glance before an update. */
+          const verdict = body.okToUpdate === true
+            ? tRef.current('settingsPreflightOk')
+            : tRef.current('settingsPreflightWarn', { count: findings.length });
+          setPreflightMessage(verdict);
+          showToast(verdict, body.okToUpdate === true ? 'ok' : 'warn');
         } finally {
-          setPreflightBusy(false);
+          if (mountedRef.current) setPreflightBusy(false);
         }
-      }, [t]);
+      }, []);
 
       if (config === null) {
         return h('div', { className: 'drg-settings' },
@@ -1683,8 +2356,25 @@ window.__ModuleLoader__.load({
           }, preflightBusy ? t('refreshing') : t('settingsPreflightRun')),
           preflightMessage === '' ? null : h('p', { className: 'drg-hint drg-settings-msg' }, preflightMessage),
           preflightFindings.length === 0 ? null : h('ul', { className: 'drg-hint' },
-            preflightFindings.map((line, index) => h('li', { key: index }, String(line)))),
+            preflightFindings.slice(0, LIST_CAP).map((line, index) => h('li', { key: index }, String(line))),
+            preflightFindings.length > LIST_CAP
+              ? h('li', { key: 'more' }, t('listMore', { n: preflightFindings.length - LIST_CAP }))
+              : null),
         ),
+
+        /* 预设卡片放在救援面板之前：它回答的是「新会话还能不能开」，比整页诊断更先要看。 */
+        h(PresetCard, {
+          key: 'preset',
+          t,
+          report: preset,
+          error: presetError,
+          busy: presetBusy,
+          copied: presetCopied,
+          onReload: loadPreset,
+          onCopy: copyPresetCommand,
+          onPolicy: savePresetPolicy,
+        }),
+
         /* Everything the bottom-right panel used to hold: diagnosis, crash classes,
          * pre-flight scan, snapshots, safe mode, watcher, and the CLI line that works
          * when DSH will not start. */
@@ -1711,16 +2401,10 @@ window.__ModuleLoader__.load({
           }
         }
         /* Report failures to the Host so the maintainer can read the exact text from
-         * .rescue/client-errors.txt — the floating box is for the user, not for debugging. */
-        const reportFailures = () => {
-          if (!failures.length) return
-          fetch('/dsh-rescue/client-errors.json', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ failures: failures.slice() }),
-          }).catch(() => {})
-        }
-        setTimeout(reportFailures, 1_500)
+         * .rescue/client-errors.txt — the floating box is for the user, not for debugging.
+         * One shared timer helper (review L3): the handle is dropped from the registry when it
+         * fires, and the POST goes through requestJson so a rejected report is logged. */
+        after(1_500, () => { void postClientFailures(failures); })
 
         guard('locale', () => {
           boundT = ctx.locale.bind(NS);
@@ -1753,12 +2437,9 @@ window.__ModuleLoader__.load({
           } catch (error) {
             console.error('[rescue-guard] settings section registration failed:', error);
             /* The packaged app has no visible console: report the exact error to the Host,
-             * or the section fails silently forever and nobody can debug it. */
-            fetch('/dsh-rescue/client-errors.json', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ failures: ['settings section factory: ' + (error?.message ?? error)] }),
-            }).catch(() => {});
+             * or the section fails silently forever and nobody can debug it. Same shared
+             * reporter as above (timeout, error text, no silent catch). */
+            void postClientFailures(['settings section factory: ' + (error?.message ?? error)]);
             return () => {};
           }
           });

@@ -69,6 +69,12 @@ dsh-rescue diagnose                 看崩溃原因 + 预检 + 给建议（先�
 dsh-rescue crashes [--limit N]      只列归类后的崩溃历史
 dsh-rescue scan                     只跑启动前静态预检
 dsh-rescue safe-mode status|on|off  安全模式
+dsh-rescue preset                    体检：默认预设是否悬空、哪些会话引用了它
+dsh-rescue preset --fix              把 patch 里悬空的 selectedDefault 改回内置预设
+dsh-rescue preset --rewrite-sessions 把会话头里缺失的预设改写成目标（需先退出 DSH）
+dsh-rescue preset --fix --rewrite-sessions   两步一起修（推荐）
+dsh-rescue preset --to standard|ptc|minimal|cordis   指定目标（默认 ptc）
+dsh-rescue preset --dry-run          只报告会改什么，不落盘
 dsh-rescue snapshot create|list|restore <id>
 dsh-rescue cookies                  量 Cookie 头体积（「认证失败」多半是它）
 dsh-rescue cookies --prune          清理陈旧 dsh-auth 令牌（先退出 DSH）
@@ -122,6 +128,57 @@ dsh-rescue enable dsh-ops
 
 ---
 
+## 预设悬空：那个没有崩溃日志的故障
+
+2026-11-15 的真实事故：关掉 `dsh-ops` 之后，DSH 能起来，但**每个会话都开不了** ——
+新会话报 `agent-preset/not-found: Unknown agent preset: ops-ptc`，老会话 `resume failed`。
+没有崩溃日志，因为宿主根本没崩。
+
+机制：`agent-preset-registry` 的 `selectedDefault` 是一个**指向预设 id 的指针**，而
+`ops-ptc` 这类预设由插件在运行时注册。插件一被禁用，指针就悬空了：
+
+| 位置 | 后果 |
+|---|---|
+| `cordis.patch.yml` 的 `selectedDefault` | 新会话无法创建 |
+| 每个会话头里的 `agentPreset`（v4 日志首帧，zstd） | 老会话无法 resume |
+| `storages/session_projcache/sessions/*.json` 的 `agentPreset.val` | 冷启动渲染时同样解析失败 |
+
+`dsh-rescue preset` 把三处一起体检；`--fix --rewrite-sessions` 一起修：
+
+```bash
+dsh-rescue preset                       # 只体检，不改任何文件
+dsh-rescue preset --dry-run --fix --rewrite-sessions   # 看会改什么
+:: 完全退出 DSH（含托盘）之后：
+dsh-rescue preset --fix --rewrite-sessions
+```
+
+几条硬约束：
+
+- **只改 `selectedDefault` 那一行**：注释、`default:`、其它块原样保留（有测试锁）。
+- **会话文件逐帧改写**：只重压「确实含 `"agentPreset":"<旧 id>"`」的帧，其余帧字节原样保留；
+  落盘前做四重校验 —— 帧数不变 / 每帧都能解 / 未命中帧逐字节相等 / 解压后残留为 0。任一不过就不写。
+- **每个文件先备份**到 `~/.dsh/backups/preset-<时间戳>/`。
+- **DSH 在跑就拒绝改写会话**（它正开着这些文件），只允许 `--dry-run` 先看。
+- 目标只能是内置四个预设（`standard` / `ptc` / `minimal` / `cordis`）—— 只有它们不依赖任何插件。
+
+### 面板里的「预设守护」是开关，默认关
+
+设置 → 启动救援 → 预设卡片里有**开关 + 回退目标下拉**：
+
+- **开关默认关**。关的时候只体检、只报告，绝不改你的配置——你可能正是要用某个插件提供的预设
+  （比如 `ops-ptc`），替你把指针改回内置反而是一种破坏。
+- 打开之后，启动时发现默认预设不存在，才把 patch 的 `selectedDefault` 改成下面选的目标
+  （**下次启动生效**；本次进程里的注册表还指向旧 id）。改之前自动备份。
+- **回退目标**可以选任何已注册的预设（列表来自宿主注册表，插件提供的也在里面），默认 `ptc`。
+  它只决定「修到哪里」，不改变你现在用哪个预设。
+- 与 CLI 共用一份文件：`~/.dsh/rescue-guard/config.json` 的 `preset.{guard,fallback}`；
+  命令行等价写法 `dsh-rescue preset --guard on --fallback standard`。
+
+为什么不做「运行时注册一个别名」：别名要复刻一个预设的组合，而预设是插件在运行时用 YAML 行
+注册的，本插件零依赖、解析不了；用空组合占位只会让会话「能打开但工具全没了」，比报错更难查。
+所以运行时（插件半边）只做**体检并在启动日志里点名**，真正的修复交给离线 CLI —— 那时 DSH 已退出，
+也才允许改会话文件。
+
 ## 安全模式
 
 布防后，**下次启动只加载 `@deepseek-ai/*` 官方 bundle**，第三方全部暂时移出；启动成功后
@@ -131,7 +188,8 @@ dsh-rescue enable dsh-ops
 
 - **绝不触碰 `@deepseek-ai/*`**（有专门测试）
 - 改写清单前**先自动快照**，回滚也可回滚
-- 原子写（`.tmp` + rename），不会留下半截文件
+- 原子写：**唯一** tmp 名（pid + 随机 + 计数）+ rename 重试（Windows 上杀毒/索引器会短暂占用）+ 
+  失败时**保留 tmp 当证据**（错误里带 `.tmpPath`），不会留下半截目标文件
 - 幂等：重复布防/应用/还原都不会损坏清单
 
 ---
@@ -153,7 +211,22 @@ dsh-rescue snapshot restore 2026-11-07T13-35-29.164Z
 ## 面板
 
 DSH 正常时，面板显示：上次启动是否正常、崩溃历史归类、预检结果、安全模式开关、
-快照管理与回滚。底部固定给出一行可复制的救援命令。
+快照管理与回滚、预设悬空状态。底部固定给出一行可复制的救援命令。
+
+**面板的写操作要鉴权**（审查 S1）：`/dsh-rescue/*` 里有改写 profile 清单、写启动项、清 cookie
+这类动作，而宿主本身不为它做鉴权。所以每个写请求都要带三层凭证：
+
+1. 只认**回环地址**（`127.0.0.1` / `::1`），别的来源一律 403；
+2. **同源校验**（带 Origin 时其 host 必须是本机；缺失 Origin 放行——Electron 同源不保证带）；
+3. 进程内 **token**（32 字节随机），写在 `<profile>/.rescue/route-token.txt`（权限收紧）；
+   高危动作（回滚、安全模式 apply/off、装守护、创建桌面入口、清 cookie、写配置）
+   再加**一次性 nonce**：`GET /dsh-rescue/handshake.json` 下发，5 分钟过期、用过即废。
+
+这些都内置在面板里，正常点击不需要你做什么；CLI 也从同一个 token 文件读，所以 DSH 起不来时
+仍然能用。想手工调接口，先握手拿 token/nonce，再带 `X-Rescue-Token`（+ 高危的 `X-Rescue-Nonce`）。
+
+安全边界还有一条：**面板不会改写正在使用的 cookie 库**。DSH 运行时 Chromium 独占它，
+改写只会被覆盖或写坏；「立即清理」在面板里只做预览并给出 CLI 命令，原库一字不动。
 
 ---
 

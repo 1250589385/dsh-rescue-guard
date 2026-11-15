@@ -30,10 +30,20 @@ import { inspectCookieDatabase, inspectCookies, MAX_HEADER_BYTES, newestCookieBa
 import { readConfig } from './lib/config.js'
 import { offerDesktopRescue, writeApplyError } from './lib/desktop-offer.js'
 import { preflight, writePostUpdateReport } from './lib/preflight.js'
+import { fixPresetPointer, readPresetPointer, writePresetState } from './lib/preset.js'
 import { scanProfile } from './lib/scan.js'
 
 /** How long after a start-up we consider it proven, when no route has been hit yet. */
 const HEALTHY_BOOT_GRACE_MS = 25_000
+
+/**
+ * When the preset guard looks at the registry.
+ *
+ * It has to be *after* every bundle applied — the preset it is checking for is registered by
+ * another plugin during apply, and asking too early would flag a perfectly good install. Three
+ * seconds is far below the first-turn latency of a real session and costs one timer.
+ */
+const PRESET_GUARD_MS = 3_000
 
 /** `confirmBoot` behind a try: a marker write failure is never worth a boot failure. */
 function confirmBootSafe(profileDir, via) {
@@ -308,6 +318,64 @@ export function apply(ctx) {
       timers.push(handle)
     }
 
+    // Preset guard: a disabled plugin can leave the registry pointing at a preset it no longer
+    // provides. Nothing crashes — which is the problem: every *session* then refuses to open
+    // ("Unknown agent preset"), and there is no crash log to explain it. 2026-11-15: turning
+    // dsh-ops off left `selectedDefault: ops-ptc` behind and both new sessions and resumes died.
+    //
+    // Diagnosis only, on purpose. Registering an empty stand-in preset at runtime would let the
+    // session open with every plugin-provided tool missing — worse than a clean error, because
+    // nothing points at the cause. The repair is the offline CLI, where the session files are
+    // closed and can be rewritten with per-frame verification.
+    timers.push(
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const registry = ctx.get?.('agentPresets')
+            if (!registry || typeof registry.list !== 'function') return
+            const pointer = readPresetPointer(paths.profileDir)
+            const live = registry.config?.selectedDefault?.get?.()
+            const wanted = live ?? pointer.effective
+            if (typeof wanted !== 'string' || wanted === '') return
+            const presets = await registry.list()
+            const available = presets.map((row) => row?.id).filter((id) => typeof id === 'string')
+            const policy = readConfig().preset
+            if (available.includes(wanted)) {
+              writePresetState(paths.profileDir, { status: 'ok', wanted, available, policy })
+              return
+            }
+            /* The guard is opt-in: a user may be running a plugin-provided preset on purpose, and
+             * rewriting their pointer without asking is exactly the surprise a rescue tool must not
+             * cause. With it on, the fallback they picked is written to the patch (backed up), and
+             * the message says it takes effect on the NEXT start — the live registry still holds
+             * the old id for this process. */
+            let repaired = null
+            if (policy.guard === true) {
+              const result = fixPresetPointer({ profileDir: paths.profileDir, to: policy.fallback })
+              repaired = { changed: result.changed === true, from: result.from ?? null, to: policy.fallback, error: result.error ?? null }
+            }
+            writePresetState(paths.profileDir, {
+              status: 'dangling',
+              wanted,
+              available,
+              policy,
+              repaired,
+              hint: 'dsh-rescue preset --fix --rewrite-sessions（先完全退出 DSH）',
+            })
+            ctx.logger?.warn?.(
+              `[dsh-rescue] 默认预设 ${wanted} 不在已注册列表里（可用：${available.join(', ')}）：` +
+                '新会话会报 agent-preset/not-found，老会话 resume 也会失败。' +
+                (repaired?.changed === true
+                  ? ` 预设守卫已把 patch 的 selectedDefault 改回 ${policy.fallback}，下次启动生效；会话头仍需要 dsh-rescue preset --rewrite-sessions。`
+                  : ' 预设守卫是关闭状态（设置 → 启动救援 → 预设守护）。退出 DSH 后运行：dsh-rescue preset --fix --rewrite-sessions')
+            )
+          } catch (error) {
+            ctx.logger?.warn?.(`[dsh-rescue] 预设体检失败：${error?.message ?? error}`)
+          }
+        })()
+      }, PRESET_GUARD_MS)
+    )
+
     // A /rescue command, so the agent can print a diagnosis without leaving the session.
     // Registration is guarded because a duplicate command name is one of the crashes this
     // plugin exists to detect — it must not be able to cause it. (dsh-purge did exactly that.)
@@ -369,11 +437,12 @@ async function describe(paths) {
   const { readCrashes, summarize } = await import('./lib/crash.js')
   const { scanProfile } = await import('./lib/scan.js')
   const dirs = (await import('./lib/paths.js')).crashDirs()
-  const crashes = readCrashes({ dirs, limit: 100 })
+  const crashes = readCrashes({ dirs, limit: 100, home: paths.home, profileDir: paths.profileDir })
   const summary = summarize(crashes)
   const scan = scanProfile({ profileDir: paths.profileDir, homeDir: paths.home })
   const safe = status({ profileDir: paths.profileDir })
   const boot = readBoot(paths.profileDir)
+  const preset = (await import('./lib/preset.js')).checkPresets({ profileDir: paths.profileDir, home: paths.home, limit: 100 })
 
   const lines = [
     `救援诊断（profile: ${paths.profileDir}）`,
@@ -386,6 +455,14 @@ async function describe(paths) {
   lines.push(`预检：命令名冲突 ${scan.collisions.length} 处，缺失文件 ${scan.missingFiles.length} 处`)
   for (const item of scan.collisions) {
     lines.push(`  /${item.name} ← ${item.plugins.join(', ')}`)
+  }
+  lines.push(
+    preset.dangling
+      ? `预设：默认 ${preset.pointer.effective} 不在已注册列表 ✗（新会话会报 agent-preset/not-found）`
+      : `预设：${preset.pointer.effective ?? '未知'}（内置）✓`
+  )
+  if (preset.sessions.missing.length > 0) {
+    lines.push(`  引用缺失预设的会话 ${preset.sessions.missing.length} 个 → 退出 DSH 后运行 dsh-rescue preset --fix --rewrite-sessions`)
   }
   lines.push(`安全模式：${safe.armed ? '已布防' : '未布防'}`)
   lines.push(`恢复目录：${rescueDir(paths.profileDir)}`)
