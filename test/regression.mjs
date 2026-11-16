@@ -9,7 +9,7 @@
  * No dependencies, no DSH: it builds throwaway profiles in the OS temp dir.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import os from 'node:os'
@@ -648,7 +648,6 @@ console.log('\n[15] 预设悬空：指针 / 会话头 / 投影缓存（2026-11-1
 {
   const preset = await import('../lib/preset.js')
   const zlib = await import('node:zlib')
-  const { spawnSync } = await import('node:child_process')
   const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 
   const root = path.join(os.tmpdir(), 'rescue-test-preset-' + Date.now())
@@ -1460,6 +1459,19 @@ console.log('\n[20] 路由鉴权 / 握手 nonce / preset 契约 / cookie 只写�
     assert(text.indexOf('DisableDelayedExpansion') >= 0, '入口未关闭 delayed expansion')
     eq(offer.installDesktopEntry({ desktop: '\\\\server\\share', pluginDir: path.join(here, '..') }).reason, 'unc-desktop', 'UNC 目录')
     eq(offer.installDesktopEntry({ desktop: path.join(root, 'nope'), pluginDir: path.join(here, '..') }).reason, 'missing-desktop', '目录不存在')
+  })
+
+  check('生成的桌面 .cmd 真能启动菜单并按 0 退出（2026-11-16：echo 里的 ) 提前关块）', () => {
+    if (process.platform !== 'win32') return
+    const made = offer.installDesktopEntry({ desktop: fakeDesktop, pluginDir: path.join(here, '..') })
+    eq(made.ok, true, '入口生成失败')
+    /* This is deliberately a real cmd.exe run, not a string assertion. The old file looked valid
+     * yet exited 4 before Node started: ')' inside the IF block's echo closed the block early. */
+    const result = spawnSync('cmd.exe', ['/d', '/c', made.path], {
+      input: '0\r\n\r\n', encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    })
+    eq(result.status, 0, '救援台应正常退出；stdout=' + String(result.stdout).slice(-500))
+    assert(String(result.stdout).includes('rescue console'), '菜单没有真正启动')
   })
 
   // ---- S6: precheck bounds ---------------------------------------------------------
