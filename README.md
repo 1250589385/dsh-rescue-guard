@@ -297,6 +297,7 @@ dsh-rescue-desktop          # 或 node bin/install-desktop.mjs
   [6] 安全模式        下次只加载官方插件
   [7] 快照            备份 / 列出 / 回滚 profile 配置
   [8] 禁用/启用插件    把可疑插件从启动列表摘掉
+  [p] 恢复缺失预设为 PTC  任意自定义预设被删后，修指针 + 会话 + 缓存（需先退出 DSH）
 ```
 
 它自己探测 Node 运行时（优先用 DSH 自带的那份，macOS/Linux 上优先 PATH），

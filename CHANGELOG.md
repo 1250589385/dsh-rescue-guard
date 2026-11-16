@@ -5,6 +5,29 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.2] - 2026-11-16
+
+### 新增
+
+- **救援台菜单 `[p] 恢复缺失预设为 PTC`**：不再只修 `ops-ptc`，任何被删除/禁用插件留下的
+  自定义预设引用都可一键恢复为内置 `ptc`。确认后执行
+  `dsh-rescue preset --fix --rewrite-sessions --to ptc`：修 patch 指针、逐帧改会话、同步投影缓存；
+  DSH 仍在运行时拒绝改写会话，回答 N 不执行任何操作。
+
+### 修复
+
+- **会话中途切换过预设时只修了创建时的 id**：例如首帧是 `custom-alpha`、后续
+  `agent-preset/selected` 事件是 `custom-beta`，旧逻辑只改 `custom-alpha`。现在一次修复会处理
+  本次扫描到的全部自定义 id，所有帧都不再有残留（由真实桌面菜单端到端测试抓到）。
+- **批量修复时同名会话日志的备份互相覆盖**：所有会话文件都叫 `session.v4.jsonl.zstd`，
+  共享备份目录原先只按文件名命名，N 个会话只剩最后一份备份。现在备份名带 session-id 目录，
+  每个会话都能独立回滚。
+
+### 测试
+
+- `test/regression.mjs`：**150 项**（含真实桌面菜单 `p → Y` 端到端：两种自定义预设、
+  全部帧、投影缓存、独立备份、修复后复检）。
+
 ## [0.6.1] - 2026-11-16
 
 ### 修复

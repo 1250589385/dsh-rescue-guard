@@ -807,7 +807,14 @@ async function main() {
         }
         for (const [from, items] of groups) {
           for (const item of items) {
-            const result = preset.rewriteSessionFile({ file: item.file, from, to: target, dryRun, backupDir })
+            const result = preset.rewriteSessionFile({
+              file: item.file,
+              from,
+              fromIds: [...groups.keys()],
+              to: target,
+              dryRun,
+              backupDir,
+            })
             outcome.sessions.push({ file: item.file, from, to: target, ...result })
             if (!dryRun) {
               if (result.error) bad(`${path.basename(path.dirname(item.file))}: ${result.error}`)

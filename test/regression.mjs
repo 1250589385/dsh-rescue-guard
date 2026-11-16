@@ -10,7 +10,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
@@ -295,7 +295,7 @@ console.log('\n[9] 救援台菜单（.cmd 只能是纯 ASCII，中文由 Node �
   const { MENU, choose, displayWidth } = await import('../lib/menu.js')
   check('菜单覆盖全部动作 + 退出', () => {
     // 12 = 9 original actions + policy/on/off + quit.
-    eq(MENU.length, 13, '行数')
+    eq(MENU.length, 14, '行数（含 p：恢复缺失预设为 PTC）')
   })
   check('CJK 按双宽计算', () => {
     eq(displayWidth('abc'), 3, 'ascii')
@@ -325,6 +325,17 @@ console.log('\n[9] 救援台菜单（.cmd 只能是纯 ASCII，中文由 Node �
   await choose('3', { ask: async () => 'Y', run: async (argv) => { ran = argv; return 0 } })
   check('回答 Y 后执行 cookies --prune', () => eq(ran.join(' '), 'cookies --prune', 'argv'))
   // 禁用插件需要包名
+  ran = null
+  const presetDeclined = await choose('p', { ask: async () => 'N', run: async (argv) => { ran = argv; return 0 } })
+  check('修复预设时回答 N 不执行', () => {
+    eq(presetDeclined.cancelled, true, 'cancelled')
+    eq(ran, null, '不应执行')
+  })
+  ran = null
+  await choose('p', { ask: async () => 'Y', run: async (argv) => { ran = argv; return 0 } })
+  check('按 p 把任意缺失的自定义预设恢复为 PTC', () => {
+    eq(ran.join(' '), 'preset --fix --rewrite-sessions --to ptc', 'argv')
+  })
   ran = null
   await choose('8', { ask: async () => 'dsh-ops', run: async (argv) => { ran = argv; return 0 } })
   check('禁用插件把包名拼进 argv', () => eq(ran.join(' '), 'disable dsh-ops', 'argv'))
@@ -758,6 +769,22 @@ console.log('\n[15] 预设悬空：指针 / 会话头 / 投影缓存（2026-11-1
     const headerText = zlib.zstdDecompressSync(after.subarray(frames[0][0], frames[0][1])).toString('utf8')
     assert(headerText.includes('"agentPreset":"ptc"'), '头帧没改')
     assert(!headerText.includes('ops-ptc'), '头帧残留旧 id')
+  })
+
+  check('同目录批量修复时，每个会话都有独立备份（不被同名文件覆盖）', () => {
+    const backupDir = path.join(root, 'preset-backups')
+    const made = []
+    for (const id of ['c', 'd']) {
+      const dir = path.join(home, 'sessions', 'w1', id)
+      mkdirSync(dir, { recursive: true })
+      const file = path.join(dir, 'session.v4.jsonl.zstd')
+      writeFileSync(file, Buffer.concat([headerFrame, eventFrame]))
+      made.push(preset.rewriteSessionFile({ file, from: 'ops-ptc', to: 'ptc', backupDir }))
+    }
+    eq(made.length, 2, '两个会话')
+    assert(made.every((item) => item.changed && item.backup), '缺少备份路径')
+    assert(made[0].backup !== made[1].backup, '两个同名会话日志的备份互相覆盖了')
+    assert(existsSync(made[0].backup) && existsSync(made[1].backup), '备份文件不存在')
   })
 
   check('rewriteProjectionCache 改写 agentPreset.val', () => {
@@ -1528,6 +1555,155 @@ console.log('\n[20] 路由鉴权 / 握手 nonce / preset 契约 / cookie 只写�
   if (prevDshHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = prevDshHome
   rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[21] 端到端：桌面救援台把两种自定义预设恢复为 PTC（不碰真实 DSH_HOME）')
+{
+  const preset = await import('../lib/preset.js')
+  const offer = await import('../lib/desktop-offer.js')
+  const zlib = await import('node:zlib')
+  const home = path.join(os.tmpdir(), 'rescue-preset-e2e-' + Date.now())
+  const profile = path.join(home, 'profiles', 'desktop')
+  const desktop = path.join(home, 'Desktop')
+  mkdirSync(profile, { recursive: true })
+  mkdirSync(desktop, { recursive: true })
+  writeFileSync(path.join(profile, 'cordis.patch.yml'), [
+    '- id: agent-preset-registry',
+    '  name: "@deepseek-ai/dsh-agent-preset-registry"',
+    '  config:',
+    '    default: standard',
+    '    selectedDefault: custom-alpha',
+    '',
+  ].join('\n'))
+
+  /* Two different custom ids: the feature is generic, not an ops-ptc special case. One session
+   * also changes preset in a later event, so checking only the first frame would miss it. */
+  const originals = new Map()
+  const makeSession = (id, firstPreset, eventPreset) => {
+    const dir = path.join(home, 'sessions', 'workspace', id)
+    mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const header = Buffer.from(JSON.stringify({ type: 'session', version: 4, id, agentPreset: firstPreset }) + '\n', 'utf8')
+    const event = Buffer.from(JSON.stringify({ type: 'agent-preset/selected', seq: 0, data: { agentPreset: eventPreset } }) + '\n', 'utf8')
+    const bytes = Buffer.concat([zlib.zstdCompressSync(header), zlib.zstdCompressSync(event)])
+    writeFileSync(file, bytes)
+    originals.set(id, bytes)
+    return file
+  }
+  const files = [
+    makeSession('session-a', 'custom-alpha', 'custom-beta'),
+    makeSession('session-b', 'custom-beta', 'custom-beta'),
+    makeSession('session-ok', 'ptc', 'ptc'),
+  ]
+  const cacheDir = path.join(home, 'storages', 'session_projcache', 'sessions')
+  mkdirSync(cacheDir, { recursive: true })
+  for (const [id, value] of [['session-a', 'custom-alpha'], ['session-b', 'custom-beta'], ['session-ok', 'ptc']]) {
+    writeFileSync(path.join(cacheDir, id + '.json'), JSON.stringify({ record: { rows: { agentPreset: { ver: 1, seq: 0, val: value } } } }, null, 2))
+  }
+
+  const made = offer.installDesktopEntry({ desktop, pluginDir: path.join(here, '..') })
+  eq(made.ok, true, '桌面入口生成')
+
+  /* Do not kill the real host running this test. A cwd-local tasklist.exe (a copy of cmd.exe)
+   * answers without any "DeepSeek Harness.exe" line, so the CLI's best-effort process check sees
+   * DSH as closed. The real host and its session files are untouched. */
+  const { copyFileSync } = await import('node:fs')
+  copyFileSync('C:\\Windows\\System32\\cmd.exe', path.join(home, 'tasklist.exe'))
+  /* Drive the prompts one at a time. Piping every answer at once is not a valid readline test:
+   * the second question can observe EOF before the repair's child process has run. */
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(here, '..', 'bin', 'dsh-rescue.mjs'), 'menu'], {
+      cwd: home,
+      env: { ...process.env, DSH_HOME: home },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    let stage = 0
+    let settled = false
+    const finish = (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ status: code, stdout, stderr })
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(null)
+    }, 60_000)
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+      if (stage === 0 && stdout.includes('输入编号后回车')) {
+        stage = 1
+        child.stdin.write('p\r\n')
+      } else if (stage === 1 && stdout.includes('(Y/N)')) {
+        stage = 2
+        child.stdin.write('Y\r\n')
+      } else if (stage === 2 && stdout.includes('— 结束（按回车返回菜单）—')) {
+        stage = 3
+        child.stdin.write('\r\n')
+      } else if (stage === 3 && stdout.includes('输入编号后回车')) {
+        stage = 4
+        child.stdin.write('0\r\n')
+      }
+    })
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
+    child.on('error', (error) => { stderr += String(error); finish(null) })
+    child.on('close', (code) => finish(code))
+  })
+
+  check('真实桌面菜单 p → Y 能完成修复并正常退出', () => {
+    eq(result.status, 0, '退出码；输出尾部=' + String(result.stdout).slice(-700))
+    assert(String(result.stdout).includes('恢复缺失预设为 PTC'), '菜单项没有出现')
+    assert(String(result.stdout).includes('修完了'), '没有完成修复：' + String(result.stdout).slice(-900))
+  })
+
+  check('patch / 两种自定义预设的全部帧 / 投影缓存都恢复为 PTC', () => {
+    const patch = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    assert(patch.includes('selectedDefault: ptc'), '指针没有恢复为 ptc')
+    assert(!patch.includes('custom-alpha'), 'patch 残留 custom-alpha')
+    for (const file of files.slice(0, 2)) {
+      const bytes = readFileSync(file)
+      for (const [start, end] of preset.splitFrames(bytes)) {
+        const text = zlib.zstdDecompressSync(bytes.subarray(start, end)).toString('utf8')
+        assert(!text.includes('custom-alpha') && !text.includes('custom-beta'), '会话帧残留自定义 id')
+        assert(text.includes('"agentPreset":"ptc"'), '会话帧没有恢复为 ptc')
+      }
+    }
+    for (const id of ['session-a', 'session-b', 'session-ok']) {
+      const cache = readFileSync(path.join(cacheDir, id + '.json'), 'utf8')
+      assert(cache.includes('"val": "ptc"'), id + ' 缓存不是 ptc')
+      assert(!cache.includes('custom-alpha') && !cache.includes('custom-beta'), id + ' 缓存残留自定义 id')
+    }
+  })
+
+  check('每个会话备份独立且字节等于原件；健康的 PTC 会话完全未改', () => {
+    const backupRoot = path.join(home, 'backups')
+    const batches = readdirSync(backupRoot).filter((name) => name.startsWith('preset-'))
+    eq(batches.length, 1, '备份批次')
+    const backupDir = path.join(backupRoot, batches[0])
+    const names = readdirSync(backupDir)
+    eq(names.length, 2, '只备份两个需要改写的会话')
+    for (const id of ['session-a', 'session-b']) {
+      const name = names.find((item) => item.startsWith(id + '-'))
+      assert(name, id + ' 没有独立备份')
+      assert(readFileSync(path.join(backupDir, name)).equals(originals.get(id)), id + ' 备份字节不等于原件')
+    }
+    assert(readFileSync(files[2]).equals(originals.get('session-ok')), '健康的 PTC 会话被改写了')
+  })
+
+  check('修复后 preset --json 返回 needsFix=false 且退出 0', () => {
+    const cli = path.join(here, '..', 'bin', 'dsh-rescue.mjs')
+    const after = spawnSync(process.execPath, [cli, 'preset', '--json', '--home', home, '--profile', profile], { encoding: 'utf8' })
+    eq(after.status, 0, '退出码')
+    const report = JSON.parse(after.stdout)
+    eq(report.pointer.effective, 'ptc', '默认指针')
+    eq(report.sessions.missing.length, 0, '仍有缺失预设会话')
+    eq(report.needsFix, false, 'needsFix')
+  })
+
+  rmSync(home, { recursive: true, force: true })
 }
 
 if (failures.length === 0) {
