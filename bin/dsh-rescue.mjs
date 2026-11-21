@@ -54,6 +54,10 @@ dsh-rescue —— DSH 启动救援工具（不依赖 DSH 本身，起不来时�
   dsh-rescue cookies --policy          查看当前自动清理策略（与设置面板同一份文件）
   dsh-rescue cookies --auto on|off     打开/关闭自动清理
   dsh-rescue cookies --keep-set N      持久化「保留最新 N 条」
+  dsh-rescue repair                   诊断并给出可执行的修复方案（只读）
+  dsh-rescue repair --apply [--yes]   执行方案：先备份，失败自动回滚
+  dsh-rescue repair --list            列出可回滚的修复事务
+  dsh-rescue repair --undo <id>       回滚某次修复
   dsh-rescue preset                   体检「默认预设是否悬空」+ 哪些会话引用了它
   dsh-rescue preset --fix             把 patch 里悬空的 selectedDefault 改回内置预设
   dsh-rescue preset --rewrite-sessions  把会话头里缺失的预设改写成目标（需先退出 DSH）
@@ -104,6 +108,11 @@ function parseArgs(argv) {
     else if (arg === '--guard') take(arg, 'guard')
     else if (arg === '--fallback') take(arg, 'fallback')
     else if (arg === '--fix') flags.fix = true
+    else if (arg === '--apply') flags.apply = true
+    else if (arg === '--yes') flags.yes = true
+    else if (arg === '--undo') take(arg, 'undo')
+    else if (arg === '--list') flags.list = true
+    else if (arg === '--running') flags.running = true
     else if (arg === '--rewrite-sessions') flags.rewriteSessions = true
     else if (arg === '--dry-run') flags.dryRun = true
     else if (arg === '--json') flags.json = true
@@ -719,6 +728,64 @@ async function main() {
 
     case 'cookies': {
       return await runCookies({ flags, rest, json: Boolean(flags.json), home })
+    }
+
+    case 'repair': {
+      const repair = await import('../lib/repair.js')
+      if (flags.list) {
+        const rows = repair.listRepairs(profile)
+        if (flags.json) { console.log(JSON.stringify(rows, null, 2)); return 0 }
+        head('可回滚的修复事务')
+        if (rows.length === 0) info('还没有任何修复事务')
+        for (const row of rows) info(row.id + '  ' + (row.steps.join(', ') || '—') + '  ' + row.files + ' 个文件')
+        return 0
+      }
+      if (flags.undo) {
+        const restored = repair.restoreFromJournal({ profileDir: profile, id: flags.undo })
+        if (flags.json) { console.log(JSON.stringify(restored, null, 2)); return restored.ok ? 0 : 1 }
+        if (restored.ok) { ok('已回滚：恢复 ' + restored.restored + ' 个文件'); return 0 }
+        console.error('回滚失败：' + restored.error)
+        return 1
+      }
+      const running = flags.running === true ? true : isDshRunning()
+      const plan = await repair.planRepairs({ profileDir: profile, home, running })
+      if (flags.json && !flags.apply) { console.log(JSON.stringify(plan, null, 2)); return plan.steps.length > 0 ? 1 : 0 }
+      head('修复方案')
+      if (plan.steps.length === 0) ok('没有可自动修复的问题')
+      for (const step of plan.steps) {
+        const tag = step.needsClosed ? paint(C.yellow, '[需退出 DSH]') : paint(C.green, '[可直接修]')
+        console.log('  ' + tag + ' ' + step.title + '  ' + paint(C.dim, '（' + step.risk + ' 风险）'))
+        info('    ' + step.reason)
+        if (step.detail) info('    ' + paint(C.dim, step.detail))
+      }
+      for (const note of plan.notes) warn(note)
+      if (!flags.apply) {
+        if (plan.steps.length > 0) {
+          console.log('')
+          info(paint(C.dim, '执行：') + ' ' + paint(C.cyan, 'dsh-rescue repair --apply' + (running ? ' --running' : '')))
+        }
+        return plan.steps.length > 0 ? 1 : 0
+      }
+      if (flags.yes !== true) {
+        console.error('执行修复需要 --yes 明确确认（会先自动备份，失败自动回滚）。')
+        return 2
+      }
+      const result = await repair.applyRepairs({
+        profileDir: profile, home, running,
+        steps: flags.to ? String(flags.to).split(',') : null,
+      })
+      if (flags.json) { console.log(JSON.stringify(result, null, 2)); return result.ok ? 0 : 1 }
+      console.log('')
+      if (result.ok) {
+        ok('修复完成：' + (result.applied.map((item) => item.id).join(', ') || '无可执行步骤'))
+        if (result.blocked.length > 0) warn('以下步骤需要完全退出 DSH 后重跑：' + result.blocked.join(', '))
+        if (result.dir) info(paint(C.dim, '回滚用：dsh-rescue repair --undo ' + result.id))
+        return 0
+      }
+      bad('修复失败：' + result.error)
+      if (result.rolledBack) warn('已自动回滚到修复前状态（备份：' + result.dir + '）')
+      else if (result.dir) warn('自动回滚未完成，请手动执行：dsh-rescue repair --undo ' + result.id)
+      return 1
     }
 
     case 'preset': {

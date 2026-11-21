@@ -55,6 +55,7 @@ window.__ModuleLoader__.load({
     const CONFIG_URL = PREFIX + '/config.json';
     const PRESET_URL = PREFIX + '/preset.json';
     const REPORT_URL = PREFIX + '/report.json';
+    const REPAIR_URL = PREFIX + '/repair.json';
     const CLIENT_ERRORS_URL = PREFIX + '/client-errors.json';
     const COOKIE_CLEAN_URL = PREFIX + '/cookies/clean.json';
     const DESKTOP_ENTRY_URL = PREFIX + '/desktop-entry.json';
@@ -131,6 +132,21 @@ window.__ModuleLoader__.load({
       settingsPresetGuardDesc: 'On: if the default preset no longer exists at start-up, rewrite the profile pointer to the target below (next start). Off by default: diagnostic only — you may deliberately run a plugin-provided preset.',
       settingsPresetFallback: 'Fallback target',
       settingsPresetFallbackDesc: 'Only decides where a repair points; it does not change which preset you use now. The list comes from the host registry, so plugin-provided presets appear too.',
+      repairTitle: 'One-click repair',
+      repairDesc: 'Turn the diagnosis into actions. The plan is read-only until you confirm; every applied step is backed up first, and any failure rolls the profile back automatically.',
+      repairPlan: 'Build repair plan',
+      repairNone: 'Nothing can be repaired automatically.',
+      repairRun: 'Apply safe steps',
+      repairRunning: 'Applying…',
+      repairDone: 'Repaired: {steps}',
+      repairBlocked: 'These steps need DSH to be fully quit: {steps}',
+      repairFailed: 'Repair failed: {message}',
+      repairRolledBack: 'Rolled back automatically.',
+      repairUndo: 'Undo last repair',
+      repairUndone: 'Restored {n} file(s).',
+      repairNeedsClosed: 'quit DSH first',
+      repairCanRun: 'can run now',
+      repairUndoHint: 'Backup id: {id}',
       settingsReportTitle: 'Report a problem',
       settingsReportDesc: 'Builds a diagnostic summary on this machine only when you click: version, crash classes, preset state, client errors. It is redacted first — no user name, home directory, absolute paths, tokens or conversation content — and nothing is uploaded automatically. Whether to submit is your decision in the browser.',
       settingsReportAsk: 'Reporting proactively helps me make this plugin better. Thank you 🙏',
@@ -292,6 +308,21 @@ window.__ModuleLoader__.load({
       settingsPresetGuardDesc: '开：启动时发现默认预设不存在，就把 profile 的指针改成下面的目标（下次启动生效）。默认关：只体检、不改你的配置——你可能正是要用某个插件提供的预设。',
       settingsPresetFallback: '回退目标',
       settingsPresetFallbackDesc: '只决定“修到哪里”，不改变你现在用哪个预设。列表来自宿主注册表，插件提供的预设也会出现。',
+      repairTitle: '一键修复',
+      repairDesc: '把诊断结论变成可执行动作。生成方案是只读的；确认执行后每步都先备份，任一步失败会把 profile 自动回滚到修复前。',
+      repairPlan: '生成修复方案',
+      repairNone: '没有可自动修复的问题。',
+      repairRun: '执行可立即修复的步骤',
+      repairRunning: '执行中…',
+      repairDone: '已修复：{steps}',
+      repairBlocked: '这些步骤需要完全退出 DSH：{steps}',
+      repairFailed: '修复失败：{message}',
+      repairRolledBack: '已自动回滚。',
+      repairUndo: '回滚上次修复',
+      repairUndone: '已恢复 {n} 个文件。',
+      repairNeedsClosed: '需先退出 DSH',
+      repairCanRun: '可直接修',
+      repairUndoHint: '备份事务：{id}',
       settingsReportTitle: '上报问题（主动反馈）',
       settingsReportDesc: '只在你点击时于本机生成诊断摘要：版本、崩溃归类、预设状态、客户端错误。生成前会自动脱敏——不含用户名、家目录、绝对路径、令牌或会话内容；不会自动上传，是否提交由你在浏览器里决定。',
       settingsReportAsk: '主动上报能帮我把这个插件修得更好，十分感谢 🙏',
@@ -2090,6 +2121,10 @@ window.__ModuleLoader__.load({
       const [reportBody, setReportBody] = useState('');
       const [reportFile, setReportFile] = useState('');
       const [reportIssueUrl, setReportIssueUrl] = useState('');
+      /* 一键修复：先出方案（只读），再执行；执行后保留事务 id 供回滚。 */
+      const [repairPlan, setRepairPlan] = useState(null);
+      const [repairBusy, setRepairBusy] = useState(false);
+      const [repairLastId, setRepairLastId] = useState('');
       /* The section is re-created on every visit to 设置; a request that lands after the
        * user navigated away must not set state on the dead tree. */
       const mountedRef = useRef(true);
@@ -2175,6 +2210,73 @@ window.__ModuleLoader__.load({
           showToast(tRef.current('cmdCopyFailed', { message: error instanceof Error ? error.message : String(error) }), 'err');
         }
       }, [preset]);
+
+      const loadRepairPlan = useCallback(async () => {
+        setRepairBusy(true);
+        try {
+          const result = await requestJson(REPAIR_URL, { method: 'GET' }, REQUEST_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true || result.body?.ok !== true) {
+            const reason = isObject(result.body) && typeof result.body.error === 'string' ? result.body.error : result.error;
+            showToast(tRef.current('repairFailed', { message: reason ?? '' }), 'err');
+            return;
+          }
+          setRepairPlan(isObject(result.body.plan) ? result.body.plan : null);
+          const rows = Array.isArray(result.body.repairs) ? result.body.repairs : [];
+          setRepairLastId(rows.length > 0 ? asString(rows[0].id, '') : '');
+        } finally {
+          if (mountedRef.current) setRepairBusy(false);
+        }
+      }, []);
+
+      const applyRepair = useCallback(async () => {
+        if (!isObject(repairPlan) || !Array.isArray(repairPlan.steps)) return;
+        const steps = repairPlan.steps.filter((step) => isObject(step) && step.needsClosed !== true).map((step) => asString(step.id, '')).filter((id) => id !== '');
+        if (steps.length === 0) {
+          showToast(tRef.current('repairBlocked', {
+            steps: repairPlan.steps.map((step) => asString(step.title, '')).join('、'),
+          }), 'warn');
+          return;
+        }
+        setRepairBusy(true);
+        try {
+          const result = await writeJson(REPAIR_URL, { action: 'apply', steps }, ACTION_TIMEOUT_MS);
+          const body = result.body ?? {};
+          if (!mountedRef.current) return;
+          const applied = isObject(body.result) && Array.isArray(body.result.applied) ? body.result.applied : [];
+          if (body.ok === true) {
+            showToast(tRef.current('repairDone', { steps: applied.map((row) => asString(row.id, '')).join(', ') }), 'ok');
+            if (isObject(body.result) && typeof body.result.id === 'string') setRepairLastId(body.result.id);
+            const blocked = isObject(body.result) && Array.isArray(body.result.blocked) ? body.result.blocked : [];
+            if (blocked.length > 0) showToast(tRef.current('repairBlocked', { steps: blocked.join(', ') }), 'warn');
+          } else {
+            const reason = asString(body.error ?? (isObject(body.result) ? body.result.error : '') ?? result.error ?? '', '');
+            showToast(tRef.current('repairFailed', { message: reason }), 'err');
+            if (isObject(body.result) && body.result.rolledBack === true) showToast(tRef.current('repairRolledBack'), 'warn');
+          }
+          await loadRepairPlan();
+        } finally {
+          if (mountedRef.current) setRepairBusy(false);
+        }
+      }, [repairPlan, loadRepairPlan]);
+
+      const undoRepair = useCallback(async () => {
+        if (repairLastId === '') return;
+        setRepairBusy(true);
+        try {
+          const result = await writeJson(REPAIR_URL, { action: 'undo', id: repairLastId }, ACTION_TIMEOUT_MS);
+          const body = result.body ?? {};
+          if (!mountedRef.current) return;
+          if (body.ok === true) {
+            showToast(tRef.current('repairUndone', { n: isObject(body.restored) ? asNumber(body.restored.restored, 0) : 0 }), 'ok');
+            await loadRepairPlan();
+          } else {
+            showToast(tRef.current('repairFailed', { message: asString(body.error ?? result.error ?? '', '') }), 'err');
+          }
+        } finally {
+          if (mountedRef.current) setRepairBusy(false);
+        }
+      }, [repairLastId, loadRepairPlan]);
 
       /**
        * 生成上报摘要（手动触发）。
@@ -2441,6 +2543,49 @@ window.__ModuleLoader__.load({
             preflightFindings.length > LIST_CAP
               ? h('li', { key: 'more' }, t('listMore', { n: preflightFindings.length - LIST_CAP }))
               : null),
+        ),
+
+        /* 一键修复：方案只读、执行需确认；失败自动回滚，事务 id 可回滚。 */
+        h('div', { className: 'drg-section', key: 'repair' },
+          h('h5', { className: 'drg-section-title' }, t('repairTitle')),
+          h('p', { className: 'drg-hint' }, t('repairDesc')),
+          h('div', { className: 'drg-actions' },
+            h('button', {
+              type: 'button',
+              className: 'drg-btn',
+              disabled: repairBusy,
+              onClick: loadRepairPlan,
+            }, repairBusy ? t('refreshing') : t('repairPlan')),
+            repairLastId === ''
+              ? null
+              : h('button', { type: 'button', className: 'drg-btn', disabled: repairBusy, onClick: undoRepair }, t('repairUndo')),
+          ),
+          repairLastId === '' ? null : h('p', { className: 'drg-hint' }, t('repairUndoHint', { id: repairLastId })),
+          (() => {
+            const steps = isObject(repairPlan) && Array.isArray(repairPlan.steps) ? repairPlan.steps : [];
+            if (!isObject(repairPlan)) return null;
+            if (steps.length === 0) return h('p', { className: 'drg-hint' }, t('repairNone'));
+            return h('div', { className: 'drg-section' },
+              ...steps.slice(0, LIST_CAP).map((step, index) => {
+                const needsClosed = isObject(step) && step.needsClosed === true;
+                return h('div', { key: 'repair-step-' + index, className: 'drg-finding', 'data-tone': needsClosed ? 'warn' : 'ok' },
+                  h('span', { className: 'drg-finding-main' },
+                    (needsClosed ? t('repairNeedsClosed') : t('repairCanRun')) + ' · ' + asString(step.title, '')),
+                  h('span', { className: 'drg-hint' }, asString(step.reason, '')),
+                  asString(step.detail, '') === '' ? null : h('span', { className: 'drg-hint drg-mono' }, asString(step.detail, '')),
+                )
+              }),
+              steps.length > LIST_CAP ? h('p', { className: 'drg-hint' }, t('listMore', { n: steps.length - LIST_CAP })) : null,
+              h('div', { className: 'drg-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'drg-btn drg-btn-primary',
+                  disabled: repairBusy || steps.every((step) => isObject(step) && step.needsClosed === true),
+                  onClick: applyRepair,
+                }, repairBusy ? t('repairRunning') : t('repairRun')),
+              ),
+            );
+          })(),
         ),
 
         /* 上报：opt-in、手动点击、先预览再决定是否提交。放在最后，不打扰日常使用。 */

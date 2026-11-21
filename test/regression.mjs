@@ -295,7 +295,7 @@ console.log('\n[9] 救援台菜单（.cmd 只能是纯 ASCII，中文由 Node �
   const { MENU, choose, displayWidth } = await import('../lib/menu.js')
   check('菜单覆盖全部动作 + 退出', () => {
     // 12 = 9 original actions + policy/on/off + quit.
-    eq(MENU.length, 14, '行数（含 p：恢复缺失预设为 PTC）')
+    eq(MENU.length, 15, '行数（含 p 预设修复 / r 一键修复）')
   })
   check('CJK 按双宽计算', () => {
     eq(displayWidth('abc'), 3, 'ascii')
@@ -1157,7 +1157,7 @@ console.log('\n[20] 路由鉴权 / 握手 nonce / preset 契约 / cookie 只写�
 
   check('注册 12 条路由并在 100ms 内返回（启动路径不得阻塞 >100ms）', () => {
     assert(registerMs < 100, 'registerRoutes 耗时 ' + registerMs + 'ms')
-    eq(routes.size, 13, '路由数（含手动上报 /report.json）')
+    eq(routes.size, 14, '路由数（含 /repair.json 与 /report.json）')
   })
 
   const handshake = await callRoute('/handshake.json')
@@ -1993,6 +1993,88 @@ console.log('\n[24] 手动上报：默认不上传、先脱敏、只由点击触
     assert(!/apply\([^)]*\).*buildReport/s.test(readFileSync(path.join(here, '..', 'index.js'), 'utf8')), '启动阶段不得生成报告')
     assert(routes.includes("'/report.json'"), '缺少手动上报路由')
     assert(/'\/report\.json'[\s\S]{0,4000}?highRisk/.test(routes), '上报会写文件，应要求 nonce')
+  })
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[25] 修复事务：方案 / 备份 / 自动回滚 / 手动回滚')
+{
+  const repair = await import('../lib/repair.js')
+  const root = path.join(os.tmpdir(), 'rescue-repair-' + Date.now())
+  const profile = path.join(root, 'profiles', 'desktop')
+  const home = root
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
+    dsh: { profile: { bundles: ['dsh-demo'] } },
+    dependencies: { 'dsh-demo': '1.0.0' },
+  }))
+  const patchBefore = [
+    '- id: agent-preset-registry',
+    '  config:',
+    '    default: standard',
+    '    selectedDefault: ghost',
+    '',
+  ].join('\n')
+  writeFileSync(path.join(profile, 'cordis.patch.yml'), patchBefore)
+
+  const plan = await repair.planRepairs({ profileDir: profile, home, running: false })
+  check('方案里包含悬空指针步骤，并标出不需要退出 DSH', () => {
+    const step = plan.steps.find((item) => item.id === 'preset-pointer')
+    assert(step, '缺少 preset-pointer 步骤')
+    eq(step.needsClosed, false, 'needsClosed')
+    eq(step.risk, 'low', 'risk')
+  })
+
+  check('dry-run 不写文件、不建事务目录', async () => {
+    const dry = await repair.applyRepairs({ profileDir: profile, home, dryRun: true })
+    eq(dry.ok, true, 'ok')
+    assert(dry.applied.length > 0, '应有可执行步骤')
+    eq(readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), patchBefore, 'dry-run 改了文件')
+  })
+
+  const applied = await repair.applyRepairs({ profileDir: profile, home, running: false, steps: ['preset-pointer'] })
+  check('执行后指针修好，事务目录里有备份与日志', () => {
+    eq(applied.ok, true, 'ok：' + applied.error)
+    eq(applied.rolledBack, false, '不应回滚')
+    const patch = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    /* 目标推导：仍有效的 default（standard）优先于内置兜底，所以修成 standard。 */
+    assert(patch.includes('selectedDefault: standard'), '指针没修成 standard：' + patch)
+    const journal = JSON.parse(readFileSync(path.join(applied.dir, 'journal.json'), 'utf8'))
+    assert(Array.isArray(journal.files) && journal.files.length > 0, 'journal 没有备份记录')
+    const backup = path.join(applied.dir, 'files', 'cordis.patch.yml')
+    eq(readFileSync(backup, 'utf8'), patchBefore, '备份内容不等于修复前')
+  })
+
+  check('回滚把文件恢复到修复前', () => {
+    const undone = repair.restoreFromJournal({ profileDir: profile, id: applied.id })
+    eq(undone.ok, true, 'ok')
+    eq(readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), patchBefore, '没恢复')
+    const rows = repair.listRepairs(profile)
+    assert(rows.some((row) => row.id === applied.id), '事务列表里没有这次修复')
+  })
+
+  check('需要退出 DSH 的步骤在 running=true 时被 blocked，不会执行', async () => {
+    const blocked = await repair.applyRepairs({ profileDir: profile, home, running: true, steps: ['preset-sessions'] })
+    eq(blocked.ok, true, 'ok')
+    eq(blocked.blocked.includes('preset-sessions'), true, 'blocked 里应包含 preset-sessions')
+    eq(blocked.applied.length, 0, '不应执行')
+  })
+
+  check('completion of failing step triggers auto-rollback', async () => {
+    /* 让最后一步必然失败：把 package.json 改成不可写内容后执行 command-clash 会被跳过，
+     * 这里改用「会话文件被替换成不可解码内容」触发 preset-sessions 失败。 */
+    const sdir = path.join(home, 'sessions', 'w', 'bad')
+    mkdirSync(sdir, { recursive: true })
+    const badFile = path.join(sdir, 'session.v4.jsonl.zstd')
+    writeFileSync(badFile, Buffer.from('not-zstd-at-all'))
+    const before = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    const failed = await repair.applyRepairs({
+      profileDir: profile, home, running: false, steps: ['preset-pointer', 'preset-sessions'],
+    })
+    eq(failed.ok, false, '应失败')
+    eq(failed.rolledBack, true, '应自动回滚')
+    eq(readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), before, '回滚后 patch 应等于修复前')
   })
 
   rmSync(root, { recursive: true, force: true })
