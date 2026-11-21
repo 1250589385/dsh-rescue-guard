@@ -1980,7 +1980,7 @@ console.log('\n[24] 手动上报：默认不上传、先脱敏、只由点击触
 
   check('issue 链接是 GitHub 新建页，超长正文会被截断而不是拼坏 URL', () => {
     const small = report.issueUrlFor('short body', '1.0.0')
-    assert(small.startsWith('https://github.com/1250589385/dsh-rescue-guard/issues/new?'), '链接前缀不对')
+    assert(small.startsWith('https://github.com/Raysnows/dsh-rescue-guard/issues/new?'), '链接前缀不对')
     assert(small.includes('title='), '缺少 title')
     const huge = report.issueUrlFor('x'.repeat(20000), '1.0.0')
     assert(huge.length < 9000, 'URL 过长：' + huge.length)

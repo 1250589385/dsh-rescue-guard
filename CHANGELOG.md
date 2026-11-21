@@ -5,6 +5,15 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] - 2026-11-21
+
+### 变更
+
+- **仓库改名后的元数据对齐**：GitHub 用户名由 `1250589385` 改为 `Raysnows`。
+  本版本的 `package.json`（repository / bugs / homepage）、上报 issue 链接、README 与回归测试
+  全部指向新地址，不再依赖 GitHub 的旧名重定向。
+- 没有功能改动；装 0.8.0 的机器无需为了功能升级。
+
 ## [0.8.0] - 2026-11-21
 
 ### 新增

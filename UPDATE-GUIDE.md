@@ -26,7 +26,7 @@ node -e "console.log(require('./node_modules/dsh-rescue-guard/package.json').ver
 
 ```bat
 cd /d D:\Worksp
-git clone https://github.com/1250589385/dsh-rescue-guard.git rg-src
+git clone https://github.com/Raysnows/dsh-rescue-guard.git rg-src
 cd rg-src
 git log --oneline
 ```
@@ -101,7 +101,7 @@ dsh plugin add file:D:\Worksp\_rg040\dsh-rescue-guard
 ### 2.3 或者：等 GitHub 推送后从仓库装
 
 ```bat
-dsh plugin add github:1250589385/dsh-rescue-guard
+dsh plugin add github:Raysnows/dsh-rescue-guard
 ```
 
 写法与 `dsh-quick-send`、`dsh-test-autofix` 一致。缺点：装的是默认分支最新提交，

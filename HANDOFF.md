@@ -99,14 +99,14 @@ Cookie 自动清理策略存在 `~/.dsh/rescue-guard/config.json`，**不是**�
 
 | 项 | 状态 |
 |---|---|
-| 仓库 | `github.com/1250589385/dsh-rescue-guard`（远端 latest **0.3.1**，本地 prepared 0.5.0）|
+| 仓库 | `github.com/Raysnows/dsh-rescue-guard`（远端 latest **0.3.1**，本地 prepared 0.5.0）|
 | npm | latest **0.2.1**，未登录（`ENEEDAUTH`）|
 | push 权限 | ❌ 本机无 git 凭据（无 `.gitconfig`、无 `.git-credentials`、无 SSH 私钥、凭据管理器无 GitHub 项），且 `git clone` 报 `Connection was reset` |
 
 **推送需要你在有自己的凭据的机器上做**：
 
 ```bash
-git clone https://github.com/1250589385/dsh-rescue-guard.git dsh-rescue-guard-src
+git clone https://github.com/Raysnows/dsh-rescue-guard.git dsh-rescue-guard-src
 # 把本目录的文件覆盖进去（保留 .git）
 git add -A && git commit -m "feat: cookie auto-clean policy, rescue console, drift fix (0.5.0)"
 git push origin main
