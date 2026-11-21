@@ -351,7 +351,14 @@ export function apply(ctx) {
              * the old id for this process. */
             let repaired = null
             if (policy.guard === true) {
-              const result = fixPresetPointer({ profileDir: paths.profileDir, to: policy.fallback })
+              /* Generic: rewrite whatever pointer keys are dangling — not just selectedDefault. */
+              const check = await import('./lib/preset.js').then((module) =>
+                module.checkPresets({ profileDir: paths.profileDir, home: paths.home, limit: 0 }))
+              const result = fixPresetPointer({
+                profileDir: paths.profileDir,
+                to: check.target,
+                keys: check.pointer.danglingKeys,
+              })
               repaired = { changed: result.changed === true, from: result.from ?? null, to: policy.fallback, error: result.error ?? null }
             }
             writePresetState(paths.profileDir, {

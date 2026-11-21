@@ -130,6 +130,16 @@ dsh-rescue enable dsh-ops
 
 ## 预设悬空：那个没有崩溃日志的故障
 
+**判定是通用的，不针对某个插件。** 可用的预设集合 = 内置四个（`standard` / `ptc` / `minimal` / `cordis`）
+**∪ 当前 profile patch 与所有已启用 bundle 的 `cordis.patch.yml` 里声明过的预设**
+（`name: '@deepseek-ai/dsh-agent-preset'` 行的 `config.id`）。所以：
+
+- 插件正常登记的 `qianyu` / `forge` 这类自定义档**不会被误判**成悬空；
+- 一旦登记来源被删（插件更新、手贴段被清、插件被禁用），它立刻被认出来，指针和引用它的会话一起修；
+- 修复目标不是写死 `ptc`：优先用仍然有效的 `default`，其次配置里的 `preset.fallback`，最后才是内置兜底；
+- `default` 和 `selectedDefault` **两个键**都会体检、都会按需修（只修后者会让下一个新会话继续失败）。
+
+
 2026-11-15 的真实事故：关掉 `dsh-ops` 之后，DSH 能起来，但**每个会话都开不了** ——
 新会话报 `agent-preset/not-found: Unknown agent preset: ops-ptc`，老会话 `resume failed`。
 没有崩溃日志，因为宿主根本没崩。
@@ -154,7 +164,7 @@ dsh-rescue preset --fix --rewrite-sessions
 
 几条硬约束：
 
-- **只改 `selectedDefault` 那一行**：注释、`default:`、其它块原样保留（有测试锁）。
+- **只改真正悬空的那个键**（`default` / `selectedDefault`）：另一个键与注释、其它块原样保留（有测试锁）。
 - **会话文件逐帧改写**：只重压「确实含 `"agentPreset":"<旧 id>"`」的帧，其余帧字节原样保留；
   落盘前做四重校验 —— 帧数不变 / 每帧都能解 / 未命中帧逐字节相等 / 解压后残留为 0。任一不过就不写。
 - **每个文件先备份**到 `~/.dsh/backups/preset-<时间戳>/`。

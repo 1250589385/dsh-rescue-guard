@@ -250,12 +250,13 @@ function printPreset(report) {
   const pointer = report.pointer.effective
   if (pointer === null) {
     info(paint(C.dim, '没读到 agent-preset-registry 的 default / selectedDefault（结构可能变了）'))
-  } else if (report.pointer.builtin) {
-    ok(`默认预设 ${pointer}（内置，永远可用）`)
+  } else if (report.pointer.known) {
+    ok(`默认预设 ${pointer}` + (report.pointer.builtin ? '（内置）' : '（由已启用插件声明）'))
   } else {
-    bad(`默认预设 ${pointer} 不是内置预设（${report.builtin.join(' / ')}）`)
-    info(paint(C.dim, '  它由某个插件在运行时注册：那个插件被禁用或卸载，这个 id 就悬空了'))
+    bad(`默认预设 ${pointer} 在当前配置里没有任何声明（内置：${report.builtin.join(' / ')}）`)
+    info(paint(C.dim, '  它原本由某个插件或手贴段提供；那个来源被删除/禁用后，这个 id 就悬空了'))
   }
+  info(`已声明预设 ${report.declared.length} 个` + (report.declared.length ? '：' + report.declared.join(', ') : '（仅内置）'))
   const sessions = report.sessions
   info(`会话：扫描 ${sessions.scanned}/${sessions.total} 个` + (sessions.unreadable ? `，${sessions.unreadable} 个读不了（过大或损坏）` : ''))
   const missingIds = Object.keys(sessions.byPreset).filter((id) => !report.builtin.includes(id))
@@ -787,8 +788,14 @@ async function main() {
         return 2
       }
 
-      if (flags.fix === true && report.dangling) {
-        outcome.pointer = preset.fixPresetPointer({ profileDir: profile, to: target, dryRun })
+      if (flags.fix === true && (report.dangling || report.pointer.danglingKeys.length > 0)) {
+        /* Repair exactly the keys that are dangling; a valid `default` must not be rewritten. */
+        outcome.pointer = preset.fixPresetPointer({
+          profileDir: profile,
+          to: target,
+          keys: report.pointer.danglingKeys,
+          dryRun,
+        })
         if (!dryRun) {
           if (outcome.pointer.error) bad('指针没改：' + outcome.pointer.error)
           else if (outcome.pointer.changed) ok(`selectedDefault ${outcome.pointer.from} → ${target}` + (outcome.pointer.backup ? paint(C.dim, '  （备份：' + outcome.pointer.backup + '）') : ''))

@@ -1706,6 +1706,126 @@ console.log('\n[21] 端到端：桌面救援台把两种自定义预设恢复为
   rmSync(home, { recursive: true, force: true })
 }
 
+console.log('\n[22] 通用预设体检：声明集合来自 profile + 已启用 bundle（另一台机器的 forge 事故）')
+{
+  const preset = await import('../lib/preset.js')
+  const zlib = await import('node:zlib')
+  const root = path.join(os.tmpdir(), 'rescue-preset-declared-' + Date.now())
+  const profile = path.join(root, 'profiles', 'desktop')
+  const home = root
+  const bundleDir = path.join(profile, 'node_modules', 'dsh-demo-presets')
+  mkdirSync(bundleDir, { recursive: true })
+
+  writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
+    dsh: { profile: { bundles: ['dsh-demo-presets'] } },
+    dependencies: { 'dsh-demo-presets': '1.0.0' },
+  }))
+  writeFileSync(path.join(profile, 'cordis.patch.yml'), [
+    '- id: agent-preset-registry',
+    '  config:',
+    '    default: standard',
+    '    selectedDefault: forge',
+    '',
+  ].join('\n'))
+
+  const bundlePatch = [
+    '- insert:',
+    '    - id: preset-forge',
+    "      name: '@deepseek-ai/dsh-agent-preset'",
+    '      config:',
+    '        id: forge',
+    "        name: 'Forge'",
+    '        plugins:',
+    '          - name: some-plugin',
+    '',
+  ].join('\n')
+  writeFileSync(path.join(bundleDir, 'cordis.patch.yml'), bundlePatch)
+  writeFileSync(path.join(bundleDir, 'package.json'), JSON.stringify({
+    name: 'dsh-demo-presets',
+    version: '1.0.0',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }))
+
+  const sessionDir = path.join(home, 'sessions', 'w', 's1')
+  mkdirSync(sessionDir, { recursive: true })
+  const sessionFile = path.join(sessionDir, 'session.v4.jsonl.zstd')
+  const frames = [
+    zlib.zstdCompressSync(Buffer.from(JSON.stringify({ type: 'session', version: 4, agentPreset: 'forge' }) + '\n', 'utf8')),
+    zlib.zstdCompressSync(Buffer.from(JSON.stringify({ type: 'agent-preset/selected', data: { agentPreset: 'forge' } }) + '\n', 'utf8')),
+  ]
+  writeFileSync(sessionFile, Buffer.concat(frames))
+
+  check('collectDeclaredPresets 能从已启用 bundle 的 patch 里读出 forge', () => {
+    const found = preset.collectDeclaredPresets({ profileDir: profile })
+    assert(found.declared.includes('forge'), '没有发现 forge：' + JSON.stringify(found))
+    assert(found.sources.some((file) => file.includes('dsh-demo-presets')), '来源里没有插件 patch')
+  })
+
+  check('插件声明过的自定义预设不算悬空（不误伤正常档）', () => {
+    const report = preset.checkPresets({ profileDir: profile, home })
+    eq(report.dangling, false, 'dangling')
+    eq(report.pointer.danglingKeys.length, 0, 'danglingKeys')
+    eq(report.sessions.missing.length, 0, '会话缺失数')
+    eq(report.needsFix, false, 'needsFix')
+    assert(report.declared.includes('forge'), 'declared 应含 forge')
+  })
+
+  /* 模拟「插件更新后不再登记 forge」：声明消失，而指针与会话仍指向它。 */
+  writeFileSync(path.join(bundleDir, 'cordis.patch.yml'), '- insert:\n    - id: unrelated\n      name: other-plugin\n')
+
+  check('声明消失后立刻判为悬空，并给出需要修的键', () => {
+    const report = preset.checkPresets({ profileDir: profile, home })
+    eq(report.dangling, true, 'dangling')
+    assert(report.pointer.danglingKeys.includes('selectedDefault'), '应标出 selectedDefault')
+    eq(report.sessions.missing.length, 1, '一个会话引用缺失预设')
+    eq(report.sessions.missing[0].agentPreset, 'forge', '缺失 id')
+    eq(report.target, 'standard', '目标应优先用仍有效的 default')
+  })
+
+  check('修复只动悬空的键，有效的 default 保持不变', () => {
+    const report = preset.checkPresets({ profileDir: profile, home })
+    const fixed = preset.fixPresetPointer({ profileDir: profile, to: report.target, keys: report.pointer.danglingKeys })
+    eq(fixed.changed, true, '应改动')
+    const patch = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    assert(patch.includes('selectedDefault: standard'), '悬空键没修')
+    assert(patch.includes('default: standard'), 'default 不应被改')
+    assert(!patch.includes('forge'), '旧 id 残留')
+  })
+
+  check('会话逐帧改写后，forge 不复存在且无需再修', () => {
+    const result = preset.rewriteSessionFile({ file: sessionFile, from: 'forge', to: 'standard' })
+    eq(result.changed, true, '应改写')
+    eq(result.error, undefined, '无错误')
+    const bytes = readFileSync(sessionFile)
+    for (const [start, end] of preset.splitFrames(bytes)) {
+      const text = zlib.zstdDecompressSync(bytes.subarray(start, end)).toString('utf8')
+      assert(!text.includes('forge'), '帧里残留 forge')
+      assert(text.includes('"agentPreset":"standard"'), '帧没有被改写')
+    }
+    const report = preset.checkPresets({ profileDir: profile, home })
+    eq(report.needsFix, false, '修完仍需修')
+  })
+
+  check('default 自身悬空时也会被标出并修复', () => {
+    writeFileSync(path.join(profile, 'cordis.patch.yml'), [
+      '- id: agent-preset-registry',
+      '  config:',
+      '    default: ghost',
+      '    selectedDefault: ptc',
+      '',
+    ].join('\n'))
+    const report = preset.checkPresets({ profileDir: profile, home })
+    assert(report.pointer.danglingKeys.includes('default'), 'default 悬空没被标出')
+    const fixed = preset.fixPresetPointer({ profileDir: profile, to: 'ptc', keys: report.pointer.danglingKeys })
+    eq(fixed.changed, true, '应修复 default')
+    const patch = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    assert(patch.includes('default: ptc'), 'default 没修')
+    assert(patch.includes('selectedDefault: ptc'), 'selectedDefault 不应被改')
+  })
+
+  rmSync(root, { recursive: true, force: true })
+}
+
 if (failures.length === 0) {
   console.log(`全部通过：${passed} 项`)
   process.exit(0)
