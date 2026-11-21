@@ -781,13 +781,30 @@ async function main() {
         return report.needsFix ? 1 : 0
       }
 
-      const outcome = { pointer: null, sessions: [], cache: [], liveDsh: isDshRunning() }
+      const outcome = { pointer: null, sessions: [], cache: [], inlineDuplicates: [], liveDsh: isDshRunning() }
       if (flags.rewriteSessions === true && outcome.liveDsh && !dryRun) {
         console.error('DSH 还在运行：会话文件正被宿主打开，改写大概率被覆盖或写坏。')
         console.error('完全退出 DSH（含托盘图标）后重跑；只想先看会改什么，加 --dry-run。')
         return 2
       }
 
+      /* 重复声明：插件也声明了同名 id 时，手贴那份会让 register() 抛 Duplicate agent preset，
+       * 整档消失。只清 profile 里那份，插件声明保持不动；没有插件声明的重复不删（删了就没来源）。 */
+      if (flags.fix === true && Array.isArray(report.duplicates)) {
+        for (const duplicate of report.duplicates) {
+          if (duplicate.removable !== true) {
+            warn(`${duplicate.id} 在 profile 里重复声明，但没有任何插件声明同名 id：先修插件，不要删手贴段`)
+            continue
+          }
+          /* removable 已在体检里确认插件仍声明同名 id，这里允许删最后一份手贴副本。 */
+          const stripped = preset.stripInlinePreset({ profileDir: profile, id: duplicate.id, allowBundleOnly: true, dryRun })
+          outcome.inlineDuplicates.push({ id: duplicate.id, ...stripped })
+          if (dryRun) continue
+          if (stripped.error) bad(`${duplicate.id} 清理失败：${stripped.error}`)
+          else ok(`${duplicate.id}：已删除 profile 里重复的手贴段（${stripped.removed} 行，插件声明保留）` +
+            (stripped.backup ? paint(C.dim, '  备份：' + stripped.backup) : ''))
+        }
+      }
       if (flags.fix === true && (report.dangling || report.pointer.danglingKeys.length > 0)) {
         /* Repair exactly the keys that are dangling; a valid `default` must not be rewritten. */
         outcome.pointer = preset.fixPresetPointer({

@@ -133,12 +133,31 @@ const presetPolicySavedViaHandshake = /const savePresetPolicy = useCallback\(asy
 console.log('预设守护: 开关（role=switch）+ 默认关:', presetGuardSwitch && presetGuardOffDefault ? 'OK' : 'FAIL')
 console.log('预设守护: 回退目标下拉（含内置标记）:', presetFallbackPicker ? 'OK' : 'FAIL')
 console.log('预设守护: 保存不清空用户已选目标:', presetPolicyKeepsChoice ? 'OK' : 'FAIL')
+// 6) 手动上报：必须二次确认、先预览、只由点击触发，且隐私声明写进界面文案。
+const reportManualOnly = /const \[reportAsk, setReportAsk\] = useState\(false\)/.test(src)
+  && /onClick: \(\) => setReportAsk\(true\)/.test(src)
+  && /const buildReport = useCallback\(async \(\) => \{/.test(src)
+  && !/useEffect\(\(\) => \{[^}]*buildReport\(/.test(src)
+const reportPreview = /className: 'drg-report-body'/.test(src)
+  && /value: reportBody/.test(src)
+  && /readOnly: true/.test(src)
+const reportNoAutoUpload = !/fetch\([^)]*github\.com/i.test(src)
+  && /window\.open\(issueUrl, '_blank', 'noopener,noreferrer'\)/.test(src)
+const reportPrivacyCopy = /settingsReportDesc:/.test(src)
+  && /settingsReportDesc: '[^']*(?:不含|no user name)/.test(src)
+  && /settingsReportAsk:/.test(src)
+
+console.log('上报: 二次确认 + 只由点击触发:', reportManualOnly ? 'OK' : 'FAIL')
+console.log('上报: 先预览（只读文本域）:', reportPreview ? 'OK' : 'FAIL')
+console.log('上报: 不自动上传，只在浏览器打开提交页:', reportNoAutoUpload ? 'OK' : 'FAIL')
+console.log('上报: 界面写明脱敏与感谢语:', reportPrivacyCopy ? 'OK' : 'FAIL')
 console.log('预设守护: 经 writeJson（token+nonce）保存:', presetPolicySavedViaHandshake ? 'OK' : 'FAIL')
 
 const presetChecks = presetUrl && presetBeforePanel && presetOkLine && presetDanglingLine
   && presetMissingCommand && presetFailureKeepsCard && presetCopyCleansTimer
   && presetGuardSwitch && presetFallbackPicker && presetGuardOffDefault
   && presetPolicyKeepsChoice && presetPolicySavedViaHandshake
+  && reportManualOnly && reportPreview && reportNoAutoUpload && reportPrivacyCopy
 const reviewChecks = crashGroupMemo && timeCache && listCaps && memoRows
   && reportAllowlist && reportOpenHardened && sharedTimers && errorReports
 const loadChecks = singleLoadEffects && presetLoadedOnce && loadDepsEmpty

@@ -1157,7 +1157,7 @@ console.log('\n[20] 路由鉴权 / 握手 nonce / preset 契约 / cookie 只写�
 
   check('注册 12 条路由并在 100ms 内返回（启动路径不得阻塞 >100ms）', () => {
     assert(registerMs < 100, 'registerRoutes 耗时 ' + registerMs + 'ms')
-    eq(routes.size, 12, '路由数')
+    eq(routes.size, 13, '路由数（含手动上报 /report.json）')
   })
 
   const handshake = await callRoute('/handshake.json')
@@ -1821,6 +1821,178 @@ console.log('\n[22] 通用预设体检：声明集合来自 profile + 已启用 
     const patch = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
     assert(patch.includes('default: ptc'), 'default 没修')
     assert(patch.includes('selectedDefault: ptc'), 'selectedDefault 不应被改')
+  })
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[23] 重复声明：插件已登记 + profile 手贴同一 id（Register 抛 Duplicate 导致整档消失）')
+{
+  const preset = await import('../lib/preset.js')
+  const root = path.join(os.tmpdir(), 'rescue-preset-dup-' + Date.now())
+  const profile = path.join(root, 'profiles', 'desktop')
+  const bundleDir = path.join(profile, 'node_modules', 'dsh-demo-presets')
+  mkdirSync(bundleDir, { recursive: true })
+
+  const bundleRow = [
+    '- insert:',
+    '    - id: preset-forge',
+    "      name: '@deepseek-ai/dsh-agent-preset'",
+    '      config:',
+    '        id: forge',
+    "        name: 'Forge'",
+    '        plugins:',
+    '          - name: some-plugin',
+    '',
+  ].join('\n')
+  writeFileSync(path.join(bundleDir, 'cordis.patch.yml'), bundleRow)
+  writeFileSync(path.join(bundleDir, 'package.json'), JSON.stringify({
+    name: 'dsh-demo-presets',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }))
+  writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
+    dsh: { profile: { bundles: ['dsh-demo-presets'] } },
+    dependencies: { 'dsh-demo-presets': '1.0.0' },
+  }))
+
+  const inlineRow = [
+    '- id: preset-forge',
+    "  name: '@deepseek-ai/dsh-agent-preset'",
+    '  config:',
+    '    id: forge',
+    "    name: 'Forge inline'",
+    '    plugins:',
+    '      - name: some-plugin',
+    '',
+  ].join('\n')
+  const otherRow = [
+    '- id: agent-preset-registry',
+    '  config:',
+    '    default: standard',
+    '    selectedDefault: forge',
+    '',
+  ].join('\n')
+  writeFileSync(path.join(profile, 'cordis.patch.yml'), otherRow + inlineRow)
+
+  check('检出重复声明，并标记为可清理（插件仍声明）', () => {
+    const duplicates = preset.findDuplicatePresets({ profileDir: profile })
+    eq(duplicates.length, 1, '重复档数')
+    eq(duplicates[0].id, 'forge', 'id')
+    eq(duplicates[0].removable, true, '有插件声明，可清手贴段')
+    const report = preset.checkPresets({ profileDir: profile, home: root })
+    eq(report.needsFix, true, 'needsFix')
+    assert(report.duplicates.some((item) => item.id === 'forge'), '报告里没有重复项')
+  })
+
+  check('清理只删手贴那段，注册表块与空白结构保留', () => {
+    const stripped = preset.stripInlinePreset({ profileDir: profile, id: 'forge', allowBundleOnly: true })
+    eq(stripped.changed, true, '应改动')
+    eq(stripped.error, undefined, '无错误')
+    assert(existsSync(stripped.backup), '缺少备份')
+    const text = readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+    assert(!text.includes('Forge inline'), '手贴段没删干净')
+    assert(text.includes('default: standard'), '注册表块被误删')
+    assert(text.includes('selectedDefault: forge'), '注册表块被误删')
+    const declared = preset.collectDeclaredPresets({ profileDir: profile }).declared
+    assert(declared.includes('forge'), '插件声明应仍存在')
+    eq(preset.findDuplicatePresets({ profileDir: profile }).length, 0, '清理后仍有重复')
+  })
+
+  check('没有插件声明的重复拒绝清理（删了就彻底没有来源）', () => {
+    const onlyInline = path.join(root, 'profiles', 'only-inline')
+    mkdirSync(onlyInline, { recursive: true })
+    writeFileSync(path.join(onlyInline, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }))
+    writeFileSync(path.join(onlyInline, 'cordis.patch.yml'), otherRow + inlineRow + inlineRow)
+    const duplicates = preset.findDuplicatePresets({ profileDir: onlyInline })
+    eq(duplicates.length, 1, '重复档数')
+    eq(duplicates[0].removable, false, '没有插件声明时不可清')
+    /* 只剩一份时，删掉它会让这一档彻底消失 —— 必须拒绝。 */
+    const single = path.join(root, 'profiles', 'single-inline')
+    mkdirSync(single, { recursive: true })
+    writeFileSync(path.join(single, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }))
+    writeFileSync(path.join(single, 'cordis.patch.yml'), otherRow + inlineRow)
+    const refused = preset.stripInlinePreset({ profileDir: single, id: 'forge' })
+    eq(refused.changed, false, '最后一份声明不得删除')
+    eq(refused.error, 'last-declaration', 'error')
+  })
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[24] 手动上报：默认不上传、先脱敏、只由点击触发')
+{
+  const report = await import('../lib/report.js')
+  const root = path.join(os.tmpdir(), 'rescue-report-' + Date.now())
+  const profile = path.join(root, 'profiles', 'desktop')
+  mkdirSync(path.join(profile, '.rescue'), { recursive: true })
+  mkdirSync(root, { recursive: true })
+  const home = root
+  const token = 'a'.repeat(64)
+  writeFileSync(path.join(profile, '.rescue', 'preset-state.json'), JSON.stringify({
+    status: 'dangling', wanted: 'forge', available: ['standard', 'ptc'],
+  }))
+  writeFileSync(path.join(profile, '.rescue', 'apply-error.txt'),
+    'Error: cannot read ' + path.join(root, 'profiles', 'desktop', 'x.yml') + ' token=' + token + '\n')
+  writeFileSync(path.join(profile, '.rescue', 'client-errors.jsonl'),
+    JSON.stringify({ failures: ['settings section: cannot read ' + path.join(home, 'secret.txt')] }) + '\n')
+  mkdirSync(path.join(root, 'rescue-guard'), { recursive: true })
+  writeFileSync(path.join(root, 'rescue-guard', 'config.json'), JSON.stringify({
+    preset: { guard: false, fallback: 'ptc' },
+  }))
+
+  const built = report.buildReport({
+    profileDir: profile, home, pluginDir: path.join(root, 'plugin'), version: '9.9.9',
+    hostVersion: '0.2.2-rc.1', extra: { note: '手动点击测试' },
+  })
+
+  check('报告是 Markdown，且带环境、预设、备注', () => {
+    assert(built.markdown.startsWith('# DSH 启动救援'), '标题缺失')
+    assert(built.markdown.includes('9.9.9'), '缺少插件版本')
+    assert(built.markdown.includes('0.2.2-rc.1'), '缺少宿主版本')
+    assert(built.markdown.includes('dangling'), '缺少预设状态')
+    assert(built.markdown.includes('手动点击测试'), '缺少用户备注')
+    eq(built.redacted, true, 'redacted 标记')
+  })
+
+  check('脱敏：家目录 / profile 路径 / token / 用户名都不出现', () => {
+    const text = built.markdown
+    assert(!text.includes(home), '出现了家目录')
+    assert(!text.includes(profile), '出现了 profile 绝对路径')
+    assert(!text.includes(token), '出现了 64 位令牌')
+    assert(text.includes('<home>') || text.includes('<profile>') || text.includes('<plugin>'), '缺少路径占位符')
+    assert(!text.includes('HP'), '出现了本机用户名')
+  })
+
+  check('不含会话正文 / Cookie / API Key（报告只读固定几类文件）', () => {
+    const source = readFileSync(path.join(here, '..', 'lib', 'report.js'), 'utf8')
+    assert(!source.includes('session.v4.jsonl.zstd'), '不得读取会话日志')
+    assert(!source.includes('Cookies'), '不得读取 cookie 库')
+    assert(!source.includes('credentials'), '不得读取凭据')
+    assert(!source.includes('fetch('), '生成报告不得联网')
+  })
+
+  check('写盘只落到 .rescue/reports，且文件名可辨识', () => {
+    const saved = report.writeReport({ profileDir: profile, markdown: built.markdown })
+    assert(existsSync(saved.file), '报告没写出来')
+    assert(path.basename(saved.file).startsWith('report-'), '文件名应以 report- 开头')
+    assert(saved.file.includes(path.join('.rescue', 'reports')), '目录不是 .rescue/reports')
+  })
+
+  check('issue 链接是 GitHub 新建页，超长正文会被截断而不是拼坏 URL', () => {
+    const small = report.issueUrlFor('short body', '1.0.0')
+    assert(small.startsWith('https://github.com/1250589385/dsh-rescue-guard/issues/new?'), '链接前缀不对')
+    assert(small.includes('title='), '缺少 title')
+    const huge = report.issueUrlFor('x'.repeat(20000), '1.0.0')
+    assert(huge.length < 9000, 'URL 过长：' + huge.length)
+  })
+
+  check('源码锁：上报只能手动触发，没有定时器/启动钩子', () => {
+    const routes = readFileSync(path.join(here, '..', 'lib', 'routes.js'), 'utf8')
+    const client = readFileSync(path.join(here, '..', 'client.js'), 'utf8')
+    assert(!/setInterval\([^)]*report/i.test(client), '客户端不得定时上报')
+    assert(!/apply\([^)]*\).*buildReport/s.test(readFileSync(path.join(here, '..', 'index.js'), 'utf8')), '启动阶段不得生成报告')
+    assert(routes.includes("'/report.json'"), '缺少手动上报路由')
+    assert(/'\/report\.json'[\s\S]{0,4000}?highRisk/.test(routes), '上报会写文件，应要求 nonce')
   })
 
   rmSync(root, { recursive: true, force: true })

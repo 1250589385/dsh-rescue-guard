@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
     const WATCH_URL = PREFIX + '/watch.json';
     const CONFIG_URL = PREFIX + '/config.json';
     const PRESET_URL = PREFIX + '/preset.json';
+    const REPORT_URL = PREFIX + '/report.json';
     const CLIENT_ERRORS_URL = PREFIX + '/client-errors.json';
     const COOKIE_CLEAN_URL = PREFIX + '/cookies/clean.json';
     const DESKTOP_ENTRY_URL = PREFIX + '/desktop-entry.json';
@@ -130,6 +131,16 @@ window.__ModuleLoader__.load({
       settingsPresetGuardDesc: 'On: if the default preset no longer exists at start-up, rewrite the profile pointer to the target below (next start). Off by default: diagnostic only — you may deliberately run a plugin-provided preset.',
       settingsPresetFallback: 'Fallback target',
       settingsPresetFallbackDesc: 'Only decides where a repair points; it does not change which preset you use now. The list comes from the host registry, so plugin-provided presets appear too.',
+      settingsReportTitle: 'Report a problem',
+      settingsReportDesc: 'Builds a diagnostic summary on this machine only when you click: version, crash classes, preset state, client errors. It is redacted first — no user name, home directory, absolute paths, tokens or conversation content — and nothing is uploaded automatically. Whether to submit is your decision in the browser.',
+      settingsReportAsk: 'Reporting proactively helps me make this plugin better. Thank you 🙏',
+      settingsReportButton: 'Build report',
+      settingsReportConfirm: 'Build the summary and open the GitHub issue page?',
+      settingsReportDone: 'Generated: {file} (body copied to the clipboard)',
+      settingsReportFailed: 'Could not build the report: {message}',
+      settingsReportPreview: 'Review before submitting (edit freely, then copy)',
+      settingsReportCopy: 'Copy body',
+      settingsReportOpen: 'Open GitHub issue page',
       settingsPresetSaved: 'Preset guard saved',
       settingsPresetSaveFailed: 'Could not save: {message}',
       settingsPresetUnknown: 'No default preset is recorded',
@@ -281,6 +292,16 @@ window.__ModuleLoader__.load({
       settingsPresetGuardDesc: '开：启动时发现默认预设不存在，就把 profile 的指针改成下面的目标（下次启动生效）。默认关：只体检、不改你的配置——你可能正是要用某个插件提供的预设。',
       settingsPresetFallback: '回退目标',
       settingsPresetFallbackDesc: '只决定“修到哪里”，不改变你现在用哪个预设。列表来自宿主注册表，插件提供的预设也会出现。',
+      settingsReportTitle: '上报问题（主动反馈）',
+      settingsReportDesc: '只在你点击时于本机生成诊断摘要：版本、崩溃归类、预设状态、客户端错误。生成前会自动脱敏——不含用户名、家目录、绝对路径、令牌或会话内容；不会自动上传，是否提交由你在浏览器里决定。',
+      settingsReportAsk: '主动上报能帮我把这个插件修得更好，十分感谢 🙏',
+      settingsReportButton: '生成上报摘要',
+      settingsReportConfirm: '生成摘要并打开 GitHub 提交页？',
+      settingsReportDone: '已生成：{file}（正文已复制到剪贴板）',
+      settingsReportFailed: '生成失败：{message}',
+      settingsReportPreview: '提交前请过一眼（可自由修改后复制）',
+      settingsReportCopy: '复制正文',
+      settingsReportOpen: '打开 GitHub 提交页',
       settingsPresetSaved: '预设守护已保存',
       settingsPresetSaveFailed: '保存失败：{message}',
       settingsPresetUnknown: '未记录默认预设',
@@ -680,6 +701,7 @@ window.__ModuleLoader__.load({
         '.drg-input{width:72px;flex:none;padding:4px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.16)));background:transparent;color:inherit;font-size:13px}',
         /* A preset id is longer than a number: the picker needs room without stretching the row. */
         '.drg-select{width:auto;min-width:150px;max-width:240px}',
+        '.drg-report-body{box-sizing:border-box;width:100%;max-height:240px;resize:vertical;padding:8px;border:1px solid var(--dsw-alias-border-l2,var(--dsh-border,rgba(255,255,255,.16)));border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-bg-base,transparent);color:var(--dsw-alias-label-primary,var(--dsh-text-primary,#e6e6e6));font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px}',
         '.drg-settings-msg{margin-top:10px;color:var(--dsw-alias-state-business-primary,var(--dsh-brand,#4a9eff))}',
         '.drg-flag-bad{color:var(--dsw-alias-state-error-primary,var(--dsh-error,#ff6b6b))}',
         '.drg-flag-warn{color:var(--dsw-alias-state-warning-primary,var(--dsh-warning,#e6a700))}',
@@ -2062,6 +2084,12 @@ window.__ModuleLoader__.load({
       const [presetBusy, setPresetBusy] = useState(false);
       const [presetCopied, setPresetCopied] = useState(false);
       const presetCopyTimer = useRef(null);
+      /* 上报：只能由这里的手动点击触发；生成前先确认，生成后先给预览。 */
+      const [reportBusy, setReportBusy] = useState(false);
+      const [reportAsk, setReportAsk] = useState(false);
+      const [reportBody, setReportBody] = useState('');
+      const [reportFile, setReportFile] = useState('');
+      const [reportIssueUrl, setReportIssueUrl] = useState('');
       /* The section is re-created on every visit to 设置; a request that lands after the
        * user navigated away must not set state on the dead tree. */
       const mountedRef = useRef(true);
@@ -2147,6 +2175,59 @@ window.__ModuleLoader__.load({
           showToast(tRef.current('cmdCopyFailed', { message: error instanceof Error ? error.message : String(error) }), 'err');
         }
       }, [preset]);
+
+      /**
+       * 生成上报摘要（手动触发）。
+       *
+       * 先把正文复制到剪贴板，再打开 GitHub 新建 issue 页：URL 有长度上限，长报告由用户粘贴。
+       * 失败只弹气泡，不改任何配置。
+       */
+      const buildReport = useCallback(async () => {
+        setReportAsk(false);
+        setReportBusy(true);
+        try {
+          const result = await writeJson(REPORT_URL, {}, ACTION_TIMEOUT_MS);
+          if (!mountedRef.current) return;
+          if (result.ok !== true || result.body?.ok !== true) {
+            const reason = isObject(result.body) && typeof result.body.error === 'string' ? result.body.error : result.error;
+            showToast(tRef.current('settingsReportFailed', { message: reason ?? '' }), 'err');
+            return;
+          }
+          const markdown = asString(result.body.markdown, '');
+          const issueUrl = asString(result.body.issueUrl, '');
+          setReportBody(markdown);
+          setReportFile(asString(result.body.file, ''));
+          setReportIssueUrl(issueUrl);
+          let copied = false;
+          try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              await navigator.clipboard.writeText(markdown);
+              copied = true;
+            }
+          } catch {
+            copied = false;
+          }
+          showToast(tRef.current('settingsReportDone', {
+            file: asString(result.body.file, ''),
+          }) + (copied ? '' : ' · ' + tRef.current('settingsReportCopy')), 'ok');
+          if (issueUrl !== '') window.open(issueUrl, '_blank', 'noopener,noreferrer');
+        } finally {
+          if (mountedRef.current) setReportBusy(false);
+        }
+      }, []);
+
+      const copyReport = useCallback(async () => {
+        try {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function' && reportBody !== '') {
+            await navigator.clipboard.writeText(reportBody);
+            showToast(tRef.current('cmdCopied'), 'ok');
+            return;
+          }
+          throw new Error('clipboard API unavailable');
+        } catch (error) {
+          showToast(tRef.current('cmdCopyFailed', { message: error instanceof Error ? error.message : String(error) }), 'err');
+        }
+      }, [reportBody]);
 
       /**
        * Persist the preset guard policy through the same config file the CLI reads.
@@ -2360,6 +2441,51 @@ window.__ModuleLoader__.load({
             preflightFindings.length > LIST_CAP
               ? h('li', { key: 'more' }, t('listMore', { n: preflightFindings.length - LIST_CAP }))
               : null),
+        ),
+
+        /* 上报：opt-in、手动点击、先预览再决定是否提交。放在最后，不打扰日常使用。 */
+        h('div', { className: 'drg-section', key: 'report' },
+          h('h5', { className: 'drg-section-title' }, t('settingsReportTitle')),
+          h('p', { className: 'drg-hint' }, t('settingsReportDesc')),
+          h('p', { className: 'drg-hint' }, t('settingsReportAsk')),
+          reportAsk
+            ? h('div', { className: 'drg-confirm' },
+              h('p', { className: 'drg-confirm-body' }, t('settingsReportConfirm')),
+              h('div', { className: 'drg-actions' },
+                h('button', { type: 'button', className: 'drg-btn drg-btn-primary', disabled: reportBusy, onClick: buildReport },
+                  reportBusy ? t('refreshing') : t('confirm')),
+                h('button', { type: 'button', className: 'drg-btn', onClick: () => setReportAsk(false) }, t('cancel')),
+              ),
+            )
+            : h('button', {
+              type: 'button',
+              className: 'drg-btn',
+              disabled: reportBusy,
+              onClick: () => setReportAsk(true),
+            }, reportBusy ? t('refreshing') : t('settingsReportButton')),
+          reportBody === ''
+            ? null
+            : h('div', { className: 'drg-section', key: 'preview' },
+              h('p', { className: 'drg-hint' }, t('settingsReportPreview') + (reportFile ? ' · ' + reportFile : '')),
+              h('textarea', {
+                className: 'drg-report-body',
+                value: reportBody,
+                rows: 12,
+                readOnly: true,
+                spellCheck: false,
+                'aria-label': t('settingsReportPreview'),
+              }),
+              h('div', { className: 'drg-actions' },
+                h('button', { type: 'button', className: 'drg-btn', onClick: copyReport }, t('settingsReportCopy')),
+                reportIssueUrl === ''
+                  ? null
+                  : h('button', {
+                    type: 'button',
+                    className: 'drg-btn drg-btn-primary',
+                    onClick: () => window.open(reportIssueUrl, '_blank', 'noopener,noreferrer'),
+                  }, t('settingsReportOpen')),
+              ),
+            ),
         ),
 
         /* 预设卡片放在救援面板之前：它回答的是「新会话还能不能开」，比整页诊断更先要看。 */
